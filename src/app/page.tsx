@@ -105,7 +105,9 @@ export default function Home() {
 
   useEffect(() => {
     if (!navigationReady || view !== "projects" || tourStep !== null) return;
-    if (window.localStorage.getItem(TOUR_STORAGE_KEY) !== "complete") setTourStep(0);
+    if (window.localStorage.getItem(TOUR_STORAGE_KEY) === "complete") return;
+    const timer = window.setTimeout(() => setTourStep(0), 0);
+    return () => window.clearTimeout(timer);
   }, [navigationReady, tourStep, view]);
 
   const handleBack = () => {

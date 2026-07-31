@@ -29,10 +29,6 @@ export default function EditableText({
   const initialValue = useRef(value);
 
   useEffect(() => {
-    setText(value);
-  }, [value]);
-
-  useEffect(() => {
     if (autoFocus && inputRef.current) {
       inputRef.current.focus();
       const end = inputRef.current.value.length;

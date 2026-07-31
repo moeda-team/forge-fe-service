@@ -285,11 +285,8 @@ export default function AIWorkspace() {
 type ChatEntry = { role: "ai" | "user"; text: string; at?: number };
 
 function MessageTime({ at }: { at?: number }) {
-  const [label, setLabel] = useState("");
-  useEffect(() => {
-    if (at) setLabel(new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
-  }, [at]);
-  return label ? <span className="text-[10px] font-normal text-zinc-400">{label}</span> : null;
+  if (!at) return null;
+  return <span suppressHydrationWarning className="text-[10px] font-normal text-zinc-400">{new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>;
 }
 
 function ChatMessage({

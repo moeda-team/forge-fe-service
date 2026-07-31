@@ -166,6 +166,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const [selectionBox, setSelectionBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [framePreset, setFramePreset] = useState<FramePresetKey | null>(null);
   const [framePresetOpen, setFramePresetOpen] = useState(false);
+  const [viewportSize, setViewportSize] = useState({ width: screen.w, height: screen.h });
   const rootRef = useRef<HTMLDivElement>(null);
   const vpRef = useRef<HTMLDivElement>(null);
   const dragNode = useRef<{ id: string; ox: number; oy: number; sx: number; sy: number; moved: boolean; textClick?: boolean } | null>(null);
@@ -220,6 +221,17 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     const z = Math.min(zw, zh, 1.2);
     setZoomPan(z, { x: (rect.width - screen.w * z) / 2, y: (rect.height - screen.h * z) / 2 });
   }, [screen.w, screen.h, setZoomPan]);
+
+  useEffect(() => {
+    const vp = vpRef.current;
+    if (!vp) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      setViewportSize((current) => current.width === width && current.height === height ? current : { width, height });
+    });
+    observer.observe(vp);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     const vp = vpRef.current;
@@ -734,12 +746,11 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     setAiCard(null);
   };
 
-  const viewportRect = vpRef.current?.getBoundingClientRect();
   const viewportWorld = {
     x: -pan.x / zoom,
     y: -pan.y / zoom,
-    w: (viewportRect?.width ?? screen.w) / zoom,
-    h: (viewportRect?.height ?? screen.h) / zoom,
+    w: viewportSize.width / zoom,
+    h: viewportSize.height / zoom,
   };
   const visibleRoots = screen.nodes.filter((node) => node.visible !== false);
   const miniMinX = Math.min(viewportWorld.x, ...visibleRoots.map((node) => node.x), 0);
@@ -828,7 +839,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
             <div className="flex-1 relative overflow-hidden bg-white">
               {canvas.showCanvasBg && <div className="absolute inset-0 pointer-events-none" style={{ backgroundColor: canvas.canvasBg, opacity: canvas.canvasBgOpacity }} />}
               <div className="absolute inset-0 pointer-events-none" style={{ backgroundImage: "radial-gradient(#a1a1aa 1px, transparent 1px)", backgroundSize: "16px 16px" }} />
-              <div ref={vpRef} data-vp="1" tabIndex={0} onMouseDown={onVpDown} onMouseMove={onVpMove} onContextMenu={(e) => onContext(e, null)} onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDragOver(true); }} onDragLeave={(e) => { if (e.target === e.currentTarget) setDragOver(false); }} onDrop={onCanvasDrop} className={`absolute inset-0 outline-none ${dragOver ? "ring-2 ring-violet-500 bg-violet-50/40" : ""}`} style={{ cursor: activeTool === "hand" ? (panning.current ? "grabbing" : "grab") : "default" }}>
+              <div ref={vpRef} data-vp="1" tabIndex={0} onMouseDown={onVpDown} onMouseMove={onVpMove} onContextMenu={(e) => onContext(e, null)} onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDragOver(true); }} onDragLeave={(e) => { if (e.target === e.currentTarget) setDragOver(false); }} onDrop={onCanvasDrop} className={`absolute inset-0 outline-none ${dragOver ? "ring-2 ring-violet-500 bg-violet-50/40" : ""}`} style={{ cursor: activeTool === "hand" ? "grab" : "default" }}>
                 {canvas.showRulers && <>
                   <div onMouseDown={(e) => { e.stopPropagation(); const id = addGuide("horizontal", (e.clientY - vpRef.current!.getBoundingClientRect().top - pan.y) / zoom); draggingGuide.current = { id, orientation: "horizontal", isNew: true }; }} className="absolute z-30 top-0 left-5 right-0 h-5 bg-white/90 backdrop-blur border-b border-zinc-200 overflow-hidden cursor-row-resize" style={{ backgroundPosition: `${pan.x}px 0`, backgroundSize: `${50 * zoom}px 5px`, backgroundImage: `linear-gradient(to right, #d4d4d8 1px, transparent 1px)` }} />
                   <div onMouseDown={(e) => { e.stopPropagation(); const id = addGuide("vertical", (e.clientX - vpRef.current!.getBoundingClientRect().left - pan.x) / zoom); draggingGuide.current = { id, orientation: "vertical", isNew: true }; }} className="absolute z-30 top-5 left-0 bottom-0 w-5 bg-white/90 backdrop-blur border-r border-zinc-200 overflow-hidden cursor-col-resize" style={{ backgroundPosition: `0 ${pan.y}px`, backgroundSize: `5px ${50 * zoom}px`, backgroundImage: `linear-gradient(to bottom, #d4d4d8 1px, transparent 1px)` }} />

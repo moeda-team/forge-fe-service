@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useCanvas } from "@/lib/store";
 
 export default function InspectorPanel() {
@@ -9,14 +9,14 @@ export default function InspectorPanel() {
   const canvasBg = useCanvas((s) => s.canvas.canvasBg);
   const canvasBgOpacity = useCanvas((s) => s.canvas.canvasBgOpacity);
   const showCanvasBg = useCanvas((s) => s.canvas.showCanvasBg);
-  const [hexDraft, setHexDraft] = useState(canvasBg.toUpperCase());
-
-  useEffect(() => setHexDraft(canvasBg.toUpperCase()), [canvasBg]);
+  const [draft, setDraft] = useState({ color: canvasBg, value: canvasBg.toUpperCase() });
+  const hexDraft = draft.color === canvasBg ? draft.value : canvasBg.toUpperCase();
+  const setHexDraft = (value: string) => setDraft({ color: canvasBg, value });
 
   const commitHex = () => {
     const normalized = hexDraft.startsWith("#") ? hexDraft : `#${hexDraft}`;
     if (/^#[0-9a-f]{6}$/i.test(normalized)) setCanvasBg(normalized.toLowerCase());
-    else setHexDraft(canvasBg.toUpperCase());
+    else setDraft({ color: canvasBg, value: canvasBg.toUpperCase() });
   };
 
   return (

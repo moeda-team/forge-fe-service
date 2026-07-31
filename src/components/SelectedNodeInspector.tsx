@@ -1,16 +1,18 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useCanvas, SCREENS, findNodeById } from "@/lib/store";
 
 function GeometryInput({ label, value, min, wrap, disabled, onCommit }: { label: string; value: number; min?: number; wrap?: boolean; disabled?: boolean; onCommit: (value: number) => void }) {
-  const [draft, setDraft] = useState(value.toFixed(2).replace(/\.00$/, ""));
+  const formatValue = (number: number) => number.toFixed(2).replace(/\.00$/, "");
+  const [draftState, setDraftState] = useState({ value, draft: formatValue(value) });
+  const draft = draftState.value === value ? draftState.draft : formatValue(value);
+  const setDraft = (next: string) => setDraftState({ value, draft: next });
   const [invalid, setInvalid] = useState(false);
-  useEffect(() => setDraft(value.toFixed(2).replace(/\.00$/, "")), [value]);
   const commit = () => {
     let next = Number(draft);
     if (!Number.isFinite(next) || (min !== undefined && next < min)) {
       setInvalid(true);
-      setDraft(value.toFixed(2).replace(/\.00$/, ""));
+      setDraft(formatValue(value));
       window.setTimeout(() => setInvalid(false), 500);
       return;
     }
