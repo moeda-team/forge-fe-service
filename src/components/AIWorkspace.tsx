@@ -62,7 +62,7 @@ export default function AIWorkspace() {
   const attachCount = attach.file + attach.folder + attach.knowledge;
 
   const toggleAttach = (k: AttachKind) =>
-    setAttach((a) => ({ ...a, [k]: a[k] > 0 ? 0 : Math.floor(Math.random() * 3) + 1 }));
+    setAttach((a) => ({ ...a, [k]: a[k] > 0 ? 0 : 1 }));
 
   const autoGrow = () => {
     const ta = taRef.current; if (!ta) return;
@@ -75,7 +75,7 @@ export default function AIWorkspace() {
     const v = ta.value.trim();
     if (!v) return;
     const parts: string[] = [];
-    if (attachCount > 0) parts.push(`[attached: ${attachCount} item(s) — ${Object.entries(attach).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`).join(", ")}]`);
+    if (attachCount > 0) parts.push(`[simulated context: ${attachCount} item(s) — ${Object.entries(attach).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`).join(", ")}]`);
     sendChat((parts.join(" ") + " " + v).trim());
     ta.value = ""; autoGrow();
   };
@@ -252,6 +252,8 @@ export default function AIWorkspace() {
                 Send
               </button>
             </div>
+
+            <p className="mt-2 px-1 text-[10px] text-zinc-400">Demo mode: model selection and attachments are local UI state; no provider or files are sent.</p>
 
             {/* drag overlay */}
             {dragging && (

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
-import { useStore, useCanvas } from "@/lib/store";
+import { getScreen, replaceScreens, SCREENS, useStore, useCanvas } from "@/lib/store";
+import { loadWorkspace, saveWorkspace, withoutTransientCanvasData } from "@/lib/workspaceStorage";
 import Sidebar from "@/components/Sidebar";
 import ProjectView from "@/components/ProjectView";
 import AIWorkspace from "@/components/AIWorkspace";
@@ -19,6 +20,29 @@ export default function Home() {
 
   useEffect(() => {
     try {
+      const workspace = loadWorkspace();
+      if (workspace) {
+        replaceScreens(workspace.screens);
+        const currentId = workspace.projects.some((project) => project.id === workspace.currentId)
+          ? workspace.currentId
+          : workspace.projects[0]?.id ?? null;
+        useStore.setState({ projects: workspace.projects, currentId, aiLog: workspace.aiLog });
+        const currentCanvas = useCanvas.getState().canvas;
+        const restoredScreen = workspace.canvas.screen && getScreen(workspace.canvas.screen)
+          ? workspace.canvas.screen
+          : currentCanvas.screen;
+        useCanvas.setState({
+          canvas: {
+            ...currentCanvas,
+            ...workspace.canvas,
+            screen: restoredScreen,
+            selIds: [],
+            history: [],
+            idx: -1,
+            clipboard: null,
+          },
+        });
+      }
       const saved = window.sessionStorage.getItem("forge:location");
       const location = saved ? JSON.parse(saved) as { view?: string; canvasMode?: "board" | "screen"; canvasScreen?: string } : null;
       const reopenCanvas = window.location.hash === "#design" || location?.view === "design";
@@ -33,6 +57,39 @@ export default function Home() {
       setNavigationReady(true);
     }
   }, [setView]);
+
+  useEffect(() => {
+    if (!navigationReady) return;
+    let timeout: number | undefined;
+    const save = () => {
+      if (timeout) window.clearTimeout(timeout);
+      const projectState = useStore.getState();
+      const canvasState = useCanvas.getState().canvas;
+      saveWorkspace({
+        version: 1,
+        projects: projectState.projects,
+        currentId: projectState.currentId,
+        aiLog: projectState.aiLog,
+        screens: SCREENS,
+        canvas: withoutTransientCanvasData(canvasState),
+      });
+    };
+    const scheduleSave = () => {
+      if (timeout) window.clearTimeout(timeout);
+      timeout = window.setTimeout(save, 250);
+    };
+    const unsubscribeStore = useStore.subscribe(scheduleSave);
+    const unsubscribeCanvas = useCanvas.subscribe(scheduleSave);
+    window.addEventListener("pagehide", save);
+    scheduleSave();
+    return () => {
+      if (timeout) window.clearTimeout(timeout);
+      unsubscribeStore();
+      unsubscribeCanvas();
+      window.removeEventListener("pagehide", save);
+      save();
+    };
+  }, [navigationReady]);
 
   useEffect(() => {
     if (!navigationReady) return;

@@ -47,6 +47,11 @@ export default function ProductTour({ step, onStepChange, onClose }: { step: num
   const [rect, setRect] = useState<Rect | null>(null);
   const current = STEPS[step];
 
+  const finish = () => {
+    window.localStorage.setItem(TOUR_STORAGE_KEY, "complete");
+    onClose();
+  };
+
   useEffect(() => {
     const update = () => {
       const element = document.querySelector(current.target);
@@ -84,11 +89,6 @@ export default function ProductTour({ step, onStepChange, onClose }: { step: num
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
-
-  const finish = () => {
-    window.localStorage.setItem(TOUR_STORAGE_KEY, "complete");
-    onClose();
-  };
 
   const next = () => {
     if (step === 1) {

@@ -26,6 +26,7 @@ export default function EditableText({
 }: EditableTextProps) {
   const [text, setText] = useState(value);
   const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+  const initialValue = useRef(value);
 
   useEffect(() => {
     setText(value);
@@ -45,6 +46,8 @@ export default function EditableText({
   };
 
   const emitCancel = () => {
+    setText(initialValue.current);
+    onChange?.(initialValue.current);
     onCancel?.();
   };
 

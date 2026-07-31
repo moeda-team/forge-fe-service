@@ -114,8 +114,9 @@ export const useStore = create<StoreState>((set, get) => ({
   aiLog: {},
   sendChat: (text) => {
     const st = get();
-    const p = st.current();
-    if (!p) return;
+    const current = st.current();
+    if (!current) return;
+    const p = cloneProject(current);
     const now = Date.now();
     const log = st.aiLog[p.id] || [{ role: "ai" as const, text: `Requirement is live for ${p.name}. Ask me to draft the brief, generate the PRD, or run an impact analysis.`, at: now - 1 }];
     log.push({ role: "user", text, at: now });
@@ -126,24 +127,32 @@ export const useStore = create<StoreState>((set, get) => ({
       applyReqEdit(p, text);
       log.push({ role: "ai", text: aiReply(p, text), at: Date.now() });
     }
-    set({ aiLog: { ...st.aiLog, [p.id]: [...log] } });
+    set({
+      projects: st.projects.map((project) => project.id === p.id ? p : project),
+      aiLog: { ...st.aiLog, [p.id]: [...log] },
+    });
   },
   sendToKanban: (id) => {
     const st = get();
-    const p = st.projects.find((x) => x.id === id);
-    if (!p || !p.requirement) return;
+    const current = st.projects.find((x) => x.id === id);
+    if (!current?.requirement) return;
+    const p = cloneProject(current);
     backfillKanban(p);
     clearNewFlags(p);
     const version = p.reqVersion || 1;
     p.kanbanSyncedVer = version;
-    const snapshot = cloneRequirement(p.requirement);
+    const snapshot = cloneRequirement(p.requirement!);
     p.requirementHistory = [
       ...(p.requirementHistory || []).filter((entry) => entry.version !== version),
       { version, requirement: snapshot, sentAt: Date.now() },
     ].sort((a, b) => a.version - b.version);
-    set({ projects: [...st.projects] });
+    set({ projects: st.projects.map((project) => project.id === id ? p : project) });
   },
 }));
+
+function cloneProject(project: Project): Project {
+  return JSON.parse(JSON.stringify(project)) as Project;
+}
 
 function aiReply(p: Project, text: string): string {
   const t = text.toLowerCase();
@@ -367,10 +376,23 @@ interface CanvasStore {
 
 const MIN_W = 1;
 const MIN_H = 1;
+const MAX_HISTORY_ENTRIES = 100;
+const MAX_HISTORY_BYTES = 8 * 1024 * 1024;
 
 function uuid(prefix = "n") {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return prefix + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function historyBytes(history: HistoryEntry[]) {
+  return history.reduce((total, entry) => total + String(entry.payload).length + (entry.inverse ? String(entry.inverse).length : 0), 0);
+}
+
+function trimHistory(history: HistoryEntry[]) {
+  while (history.length > 1 && (history.length > MAX_HISTORY_ENTRIES || historyBytes(history) > MAX_HISTORY_BYTES)) {
+    const removed = history.shift()!;
+    history[0].inverse = removed.payload;
+  }
 }
 
 type FigmaPaint = {
@@ -751,6 +773,10 @@ function toLocal(n: CNode, p: { x: number; y: number }) {
 
 export function getScreen(name: string): Screen | undefined { return SCREENS.find((s) => s.name === name); }
 
+export function replaceScreens(screens: Screen[]) {
+  SCREENS.splice(0, SCREENS.length, ...JSON.parse(JSON.stringify(screens)) as Screen[]);
+}
+
 export function findNodeById(screen: Screen, id: string): CNode | undefined {
   const stack = [...screen.nodes];
   while (stack.length) {
@@ -765,7 +791,10 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
   canvas: { screen: "Dashboard", mode: "screen", selIds: [], history: [], idx: -1, canvasBg: "#f5f5f5", canvasBgOpacity: 1, showCanvasBg: true, zoom: 1, pan: { x: 0, y: 0 }, guides: [], showAlignmentGrid: false, showRulers: true, showMinimap: false, clipboard: null as CNode[] | null, tool: "move" },
   activeTool: "move",
   setActiveTool: (t) => set({ activeTool: t }),
-  setCanvasScreen: (s) => set({ canvas: { ...get().canvas, screen: s, mode: "screen", selIds: [] } }),
+  setCanvasScreen: (s) => {
+    const screen = getScreen(s)?.name ?? SCREENS[0]?.name ?? "Dashboard";
+    set({ canvas: { ...get().canvas, screen, mode: "screen", selIds: [] } });
+  },
   setCanvasMode: (m) => set({ canvas: { ...get().canvas, mode: m } }),
   setSel: (id, additive = false, range = false) => {
     const st = get();
@@ -1195,11 +1224,10 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
   pushHistory: (action = "UPDATE_FRAME", affectedIds = []) => set((st) => {
     const history = st.canvas.history.slice(0, st.canvas.idx + 1);
     const payload = JSON.stringify({ screens: SCREENS, guides: st.canvas.guides, zoom: st.canvas.zoom, pan: st.canvas.pan });
-    const inverse = st.canvas.idx >= 0 ? st.canvas.history[st.canvas.idx].payload : INITIAL_CANVAS_SNAPSHOT;
     if (st.canvas.idx >= 0 && st.canvas.history[st.canvas.idx].payload === payload) return {};
-    history.push({ id: uuid("history"), timestamp: Date.now(), action, payload, inverse, affectedIds });
-    let idx = history.length - 1;
-    if (history.length > 100) { history.shift(); idx = 99; }
+    history.push({ id: uuid("history"), timestamp: Date.now(), action, payload, inverse: st.canvas.idx < 0 ? INITIAL_CANVAS_SNAPSHOT : null, affectedIds });
+    trimHistory(history);
+    const idx = history.length - 1;
     return { canvas: { ...st.canvas, history, idx } };
   }),
   commitHistory: (replaceCurrent = false, action = "MOVE_FRAMES", affectedIds = []) => {
@@ -1216,13 +1244,15 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
         affectedIds: affectedIds.length ? affectedIds : history[st.canvas.idx].affectedIds,
         payload: JSON.stringify({ screens: SCREENS, guides: st.canvas.guides, zoom: st.canvas.zoom, pan: st.canvas.pan }),
       };
-      return { canvas: { ...st.canvas, history } };
+      trimHistory(history);
+      return { canvas: { ...st.canvas, history, idx: Math.min(st.canvas.idx, history.length - 1) } };
     });
   },
   undo: () => set((st) => {
     if (st.canvas.idx < 0) return {};
     const entry = st.canvas.history[st.canvas.idx];
-    const snap = JSON.parse(entry.inverse as string) as { screens: Screen[]; guides: Guide[]; zoom: number; pan: { x: number; y: number } };
+    const inverse = entry.inverse ?? (st.canvas.idx > 0 ? st.canvas.history[st.canvas.idx - 1].payload : INITIAL_CANVAS_SNAPSHOT);
+    const snap = JSON.parse(inverse as string) as { screens: Screen[]; guides: Guide[]; zoom: number; pan: { x: number; y: number } };
     snap.screens.forEach((s, i) => { SCREENS[i].nodes = s.nodes; SCREENS[i].w = s.w; SCREENS[i].h = s.h; });
     return { canvas: { ...st.canvas, idx: st.canvas.idx - 1, selIds: [], guides: snap.guides, zoom: snap.zoom, pan: snap.pan } };
   }),

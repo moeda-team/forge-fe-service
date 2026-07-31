@@ -77,7 +77,8 @@ function LayerLabel({
         defaultValue={name}
         onBlur={(e) => onFinish(e.currentTarget.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === "Escape") onFinish(e.currentTarget.value);
+          if (e.key === "Enter") onFinish(e.currentTarget.value);
+          if (e.key === "Escape") onFinish(name);
         }}
         onMouseDown={(e) => e.stopPropagation()}
         className="w-full bg-transparent outline-none text-[13px]"
