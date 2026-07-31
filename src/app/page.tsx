@@ -1,13 +1,15 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getScreen, replaceScreens, SCREENS, useStore, useCanvas } from "@/lib/store";
 import { loadWorkspace, saveWorkspace, withoutTransientCanvasData } from "@/lib/workspaceStorage";
+import { hydrateWorkspace, importLocalWorkspace, persistCanvas } from "@/lib/api";
 import Sidebar from "@/components/Sidebar";
 import ProjectView from "@/components/ProjectView";
 import AIWorkspace from "@/components/AIWorkspace";
 import Kanban from "@/components/Kanban";
 import DesignCanvas from "@/components/DesignCanvas";
 import ProductTour, { TOUR_STORAGE_KEY } from "@/components/ProductTour";
+import AuthGate from "@/components/AuthGate";
 
 export default function Home() {
   const view = useStore((s) => s.view);
@@ -16,33 +18,23 @@ export default function Home() {
   const canvasMode = useCanvas((s) => s.canvas.mode);
   const canvasScreen = useCanvas((s) => s.canvas.screen);
   const [navigationReady, setNavigationReady] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
   const [tourStep, setTourStep] = useState<number | null>(null);
 
+  const hydrate = useCallback(async () => {
+    const recovery = loadWorkspace();
+    const remote = await hydrateWorkspace();
+    if (remote.projects.length === 0 && recovery?.projects.length) {
+      try { await importLocalWorkspace(remote.workspaceId, recovery); } catch { /* one-time imports are intentionally safe to retry after refresh */ }
+      const imported = await hydrateWorkspace();
+      replaceScreens(imported.screens); useStore.setState({ projects: imported.projects, currentId: imported.projects[0]?.id ?? null, aiLog: imported.aiLog });
+    } else { replaceScreens(remote.screens); useStore.setState({ projects: remote.projects, currentId: remote.projects[0]?.id ?? null, aiLog: remote.aiLog }); }
+    setAuthenticated(true); setNavigationReady(true);
+  }, []);
+
   useEffect(() => {
+    if (!authenticated) return;
     try {
-      const workspace = loadWorkspace();
-      if (workspace) {
-        replaceScreens(workspace.screens);
-        const currentId = workspace.projects.some((project) => project.id === workspace.currentId)
-          ? workspace.currentId
-          : workspace.projects[0]?.id ?? null;
-        useStore.setState({ projects: workspace.projects, currentId, aiLog: workspace.aiLog });
-        const currentCanvas = useCanvas.getState().canvas;
-        const restoredScreen = workspace.canvas.screen && getScreen(workspace.canvas.screen)
-          ? workspace.canvas.screen
-          : currentCanvas.screen;
-        useCanvas.setState({
-          canvas: {
-            ...currentCanvas,
-            ...workspace.canvas,
-            screen: restoredScreen,
-            selIds: [],
-            history: [],
-            idx: -1,
-            clipboard: null,
-          },
-        });
-      }
       const saved = window.sessionStorage.getItem("forge:location");
       const location = saved ? JSON.parse(saved) as { view?: string; canvasMode?: "board" | "screen"; canvasScreen?: string } : null;
       const reopenCanvas = window.location.hash === "#design" || location?.view === "design";
@@ -53,10 +45,8 @@ export default function Home() {
       }
     } catch {
       window.sessionStorage.removeItem("forge:location");
-    } finally {
-      setNavigationReady(true);
     }
-  }, [setView]);
+  }, [authenticated, setView]);
 
   useEffect(() => {
     if (!navigationReady) return;
@@ -82,11 +72,15 @@ export default function Home() {
     const unsubscribeCanvas = useCanvas.subscribe(scheduleSave);
     window.addEventListener("pagehide", save);
     scheduleSave();
+    const saveRemoteCanvas = () => { const state = useStore.getState(); const screen = getScreen(useCanvas.getState().canvas.screen); if (state.currentId && screen?.projectId === state.currentId) void persistCanvas(state.currentId, screen, useCanvas.getState().canvas.guides).catch(() => undefined); };
+    const remoteTimer = window.setInterval(saveRemoteCanvas, 2000);
     return () => {
       if (timeout) window.clearTimeout(timeout);
       unsubscribeStore();
       unsubscribeCanvas();
       window.removeEventListener("pagehide", save);
+      window.clearInterval(remoteTimer);
+      saveRemoteCanvas();
       save();
     };
   }, [navigationReady]);
@@ -114,6 +108,7 @@ export default function Home() {
     setView(prevView || "projects");
   };
 
+  if (!authenticated) return <AuthGate onAuthenticated={hydrate} />;
   if (!navigationReady) return <div className="h-screen bg-zinc-50" />;
 
   return (

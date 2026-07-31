@@ -17,10 +17,10 @@ export default function ProjectView() {
     setDescription("");
   };
 
-  const submitProject = (event: React.FormEvent<HTMLFormElement>) => {
+  const submitProject = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!name.trim()) return;
-    addProject(name, description);
+    await addProject(name, description);
     closeCreate();
   };
 

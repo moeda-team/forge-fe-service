@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { Project, Requirement, ReqItem, KanbanCard, Screen, CNode, NodeType, Guide, Tool, HistoryEntry } from "./types";
+import type { Project, Requirement, ReqItem, KanbanCard, Screen, CNode, NodeType, Guide, Tool, HistoryEntry, Stage } from "./types";
+import { assistantMessage, createCurrentWorkspaceProject, syncKanban } from "./api";
 
 export const STAGES = ["Brief", "Design", "Build", "Launch", "Scale"];
 
@@ -107,6 +108,12 @@ export const useStore = create<StoreState>((set, get) => ({
       updated: "now",
     };
     set((st) => ({ projects: [project, ...st.projects] }));
+    SCREENS.push({ name: `Design · ${id}`, w: 390, h: 720, projectId: id, nodes: [] });
+    void createCurrentWorkspaceProject(cleanName, desc.trim()).then((remote) => {
+      const persisted: Project = { ...project, id: remote.id, name: remote.name, type: remote.type, desc: remote.description, stage: remote.stage as Stage, prog: remote.progress, live: remote.live, updated: "now" };
+      const screen = SCREENS.find((item) => item.projectId === id); if (screen) { screen.projectId = remote.id; screen.name = `Design · ${remote.id}`; }
+      set((st) => ({ projects: st.projects.map((item) => item.id === id ? persisted : item), currentId: st.currentId === id ? remote.id : st.currentId }));
+    }).catch(() => { replaceScreens(SCREENS.filter((item) => item.projectId !== id)); set((st) => ({ projects: st.projects.filter((item) => item.id !== id) })); });
     return id;
   },
   openProject: (id) => set({ currentId: id, view: "ai" }),
@@ -131,6 +138,9 @@ export const useStore = create<StoreState>((set, get) => ({
       projects: st.projects.map((project) => project.id === p.id ? p : project),
       aiLog: { ...st.aiLog, [p.id]: [...log] },
     });
+    void assistantMessage(p.id, text).then((remote) => {
+      set((latest) => ({ projects: latest.projects.map((project) => project.id === p.id ? { ...project, req: true, requirement: remote.requirement.content, reqVersion: remote.requirement.version, reqUpdatedAt: Date.now() } : project), aiLog: { ...latest.aiLog, [p.id]: [...(latest.aiLog[p.id] || []), { role: "ai", text: remote.message, at: Date.now() }] } }));
+    }).catch(() => undefined);
   },
   sendToKanban: (id) => {
     const st = get();
@@ -147,6 +157,11 @@ export const useStore = create<StoreState>((set, get) => ({
       { version, requirement: snapshot, sentAt: Date.now() },
     ].sort((a, b) => a.version - b.version);
     set({ projects: st.projects.map((project) => project.id === id ? p : project) });
+    void syncKanban(id).then((remote) => {
+      const kanban = { backlog: [] as KanbanCard[], todo: [] as KanbanCard[], progress: [] as KanbanCard[], done: [] as KanbanCard[] };
+      remote.cards.forEach((card) => { const status = card.status === "BACKLOG" ? "backlog" : card.status === "TODO" ? "todo" : card.status === "PROGRESS" ? "progress" : "done"; kanban[status].push({ id: card.id, title: card.title, canvas: card.canvas, reqRef: card.requirementRef || undefined, status }); });
+      set((latest) => ({ projects: latest.projects.map((project) => project.id === id ? { ...project, kanban, kanbanSyncedVer: remote.version } : project) }));
+    }).catch(() => undefined);
   },
 }));
 
