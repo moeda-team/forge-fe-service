@@ -10,6 +10,11 @@ export default function ProjectView() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+  const apiError = useStore((s) => s.apiError);
+  const apiEnabled = useStore((s) => s.apiEnabled);
+  const user = useStore((s) => s.user);
+  const logout = useStore((s) => s.logout);
 
   const closeCreate = () => {
     setCreating(false);
@@ -20,8 +25,15 @@ export default function ProjectView() {
   const submitProject = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!name.trim()) return;
-    await addProject(name, description);
-    closeCreate();
+    setSaving(true);
+    try {
+      await addProject(name, description);
+      closeCreate();
+    } catch {
+      // API error is rendered in the dialog.
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -31,14 +43,21 @@ export default function ProjectView() {
           <h1 className="text-2xl font-semibold">Projects</h1>
           <p className="text-zinc-500 text-sm">every generation wrapped in one place</p>
         </div>
-        <button
-          type="button"
-          data-tour="new-project"
-          onClick={() => setCreating(true)}
-          className="shrink-0 rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-zinc-800"
-        >
-          + New project
-        </button>
+        <div className="flex items-center gap-2">
+          {apiEnabled && user && (
+            <button type="button" onClick={logout} className="rounded-xl border border-zinc-300 px-3 py-2.5 text-xs text-zinc-600 hover:border-zinc-900 hover:text-zinc-900" title={user.email}>
+              Sign out
+            </button>
+          )}
+          <button
+            type="button"
+            data-tour="new-project"
+            onClick={() => setCreating(true)}
+            className="shrink-0 rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-zinc-800"
+          >
+            + New project
+          </button>
+        </div>
       </header>
       <div className="p-8 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {projects.map((p) => (
@@ -100,12 +119,14 @@ export default function ProjectView() {
               </p>
             </label>
 
+            {apiError && <p className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{apiError}</p>}
+
             <div className="mt-6 flex justify-end gap-2">
               <button type="button" onClick={closeCreate} className="rounded-xl border border-zinc-200 px-4 py-2.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
                 Cancel
               </button>
-              <button type="submit" disabled={!name.trim()} className="rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">
-                Create project
+              <button type="submit" disabled={!name.trim() || saving} className="rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-40">
+                {saving ? "Creating…" : "Create project"}
               </button>
             </div>
           </form>

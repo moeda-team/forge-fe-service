@@ -26,6 +26,10 @@ export interface KanbanCard {
   title: string;
   canvas?: string | null;
   reqRef?: string;
+  requirementKey?: string | null;
+  requirementVersion?: number | null;
+  obsolete?: boolean;
+  order?: number;
   status: "backlog" | "todo" | "progress" | "done";
 }
 
@@ -48,7 +52,66 @@ export interface Project {
   updated: string;
 }
 
-export type ViewKey = "projects" | "ai" | "kanban" | "design";
+export type ViewKey = "projects" | "ai" | "kanban" | "design" | "artifact";
+
+export type ArtifactKind = "frontend" | "backend" | "database" | "testing";
+
+export interface ArtifactContent {
+  summary: string;
+  sections: { title: string; items: string[] }[];
+  tasks: { id: string; title: string; status: string; reqRef: string | null }[];
+  files?: ArtifactFile[];
+  quality?: ArtifactQualityReport;
+}
+
+export interface ArtifactQualityReport {
+  status: "passed" | "failed";
+  checkedAt: string;
+  checks: { key: string; label: string; passed: boolean; detail: string }[];
+}
+
+export interface ArtifactFile {
+  path: string;
+  language: string;
+  content: string;
+}
+
+export interface CanvasArtifact {
+  id: string;
+  projectId: string;
+  kind: ArtifactKind;
+  requirementVersion: number;
+  status: string;
+  content: ArtifactContent;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OrchestrationStep {
+  key: string;
+  label: string;
+  status: "pending" | "running" | "completed" | "failed";
+  startedAt?: string;
+  completedAt?: string;
+  fileCount?: number;
+  taskCount?: number;
+  checkCount?: number;
+  error?: string;
+}
+
+export interface OrchestrationRun {
+  id: string;
+  projectId: string;
+  requirementVersion: number;
+  status: "running" | "completed" | "failed";
+  trigger: "automatic" | "manual" | "retry";
+  steps: OrchestrationStep[];
+  error?: string | null;
+  startedAt: string;
+  completedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export type NodeType = "frame" | "frame_group" | "text" | "button" | "input" | "card" | "row" | "section" | "image" | "component" | "line" | "arrow" | "polygon" | "star" | "svg" | "instance" | "group";
 
@@ -86,8 +149,8 @@ export interface CNode {
     shapeKind?: string;
     direction?: "row" | "col";
     autoLayout?: boolean;
-    layoutSizingHorizontal?: "hug" | "fixed";
-    layoutSizingVertical?: "hug" | "fixed";
+    layoutSizingHorizontal?: "hug" | "fixed" | "fill";
+    layoutSizingVertical?: "hug" | "fixed" | "fill";
     gap?: number;
     wrap?: boolean;
     align?: "start" | "center" | "end" | "stretch" | "between";
@@ -115,15 +178,39 @@ export interface CNode {
     fontFamily?: string;
     letterSpacing?: number;
     lineHeight?: number;
+    paragraphSpacing?: number;
+    textAlign?: "left" | "center" | "right" | "justify";
+    textVerticalAlign?: "top" | "center" | "bottom";
+    textDecoration?: "none" | "underline" | "line-through";
+    textCase?: "original" | "upper" | "lower" | "title";
+    verticalTrim?: boolean;
+    listStyle?: "none" | "bulleted" | "numbered";
+    truncateText?: boolean;
   };
 }
 
 export interface Screen {
+  id?: string;
+  revision?: number;
   name: string;
   w: number;
   h: number;
   nodes: CNode[];
   projectId?: string;
+  guides?: Guide[];
+  settings?: Partial<ScreenSettings>;
+  history?: HistoryEntry[];
+}
+
+export interface ScreenSettings {
+  canvasBg: string;
+  canvasBgOpacity: number;
+  showCanvasBg: boolean;
+  showAlignmentGrid: boolean;
+  showRulers: boolean;
+  showMinimap: boolean;
+  zoom?: number;
+  pan?: { x: number; y: number };
 }
 
 export interface Guide {

@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import type { Project, Requirement, ReqItem, KanbanCard, Screen, CNode, NodeType, Guide, Tool, HistoryEntry, Stage } from "./types";
-import { assistantMessage, createCurrentWorkspaceProject, syncKanban } from "./api";
+import type { ArtifactKind, Project, Requirement, ReqItem, KanbanCard, Screen, CNode, NodeType, Guide, Tool, HistoryEntry, ScreenSettings, ViewKey } from "./types";
+import { ApiError, apiEnabled, forgeApi, getAccessToken, mapProject, mapRequirement, mapRequirementSnapshots, setAccessToken, type KanbanSyncResult } from "./api";
+import { layoutAutoLayout, layoutCanvasNodes, measureCanvasText } from "./canvasLayout";
 
 export const STAGES = ["Brief", "Design", "Build", "Launch", "Scale"];
 
@@ -71,29 +72,98 @@ function seedProjects(): Project[] {
 
 interface StoreState {
   projects: Project[];
+  apiEnabled: boolean;
+  apiReady: boolean;
+  authRequired: boolean;
+  apiError: string | null;
+  user: { id: string; email: string; name?: string } | null;
+  bootstrapApi: () => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
+  register: (name: string, email: string, password: string) => Promise<void>;
+  logout: () => void;
   currentId: string | null;
-  view: "projects" | "ai" | "kanban" | "design";
-  prevView?: "projects" | "ai" | "kanban" | "design";
-  setView: (v: "projects" | "ai" | "kanban" | "design") => void;
-  addProject: (name: string, desc?: string) => string | undefined;
+  view: ViewKey;
+  prevView?: ViewKey;
+  artifactKind: ArtifactKind;
+  setView: (v: ViewKey) => void;
+  setArtifactCanvas: (kind: ArtifactKind) => void;
+  addProject: (name: string, desc?: string) => Promise<string | undefined>;
   openProject: (id: string) => void;
   current: () => Project | undefined;
   aiLog: Record<string, { role: "ai" | "user"; text: string; at?: number }[]>;
-  sendChat: (text: string) => void;
-  sendToKanban: (id: string) => void;
+  sendChat: (text: string, model?: string, attachments?: Record<string, number>) => Promise<void>;
+  sendToKanban: (id: string) => Promise<KanbanSyncResult | void>;
+  moveKanbanCard: (projectId: string, cardId: string, status: KanbanCard["status"], index: number) => Promise<void>;
+  refreshProject: (id: string) => Promise<void>;
 }
 
 export const useStore = create<StoreState>((set, get) => ({
   projects: seedProjects(),
+  apiEnabled,
+  apiReady: !apiEnabled,
+  authRequired: false,
+  apiError: null,
+  user: null,
+  bootstrapApi: async () => {
+    if (!apiEnabled) return;
+    if (!getAccessToken()) {
+      set({ apiReady: true, authRequired: true, projects: [], currentId: null });
+      return;
+    }
+    try {
+      const [user, projects] = await Promise.all([forgeApi.me(), forgeApi.listProjects()]);
+      set({ user, projects: projects.map(mapProject), currentId: null, apiReady: true, authRequired: false, apiError: null, view: "projects" });
+    } catch (error) {
+      const authRequired = error instanceof ApiError && error.status === 401;
+      set({ apiReady: true, authRequired, apiError: authRequired ? null : errorMessage(error), projects: [], currentId: null });
+    }
+  },
+  login: async (email, password) => {
+    set({ apiError: null });
+    try {
+      const user = await forgeApi.login(email, password);
+      const projects = await forgeApi.listProjects();
+      set({ user, projects: projects.map(mapProject), currentId: null, authRequired: false, apiReady: true, view: "projects" });
+    } catch (error) {
+      set({ apiError: errorMessage(error) });
+      throw error;
+    }
+  },
+  register: async (name, email, password) => {
+    set({ apiError: null });
+    try {
+      const user = await forgeApi.register(name, email, password);
+      set({ user, projects: [], currentId: null, authRequired: false, apiReady: true, view: "projects" });
+    } catch (error) {
+      set({ apiError: errorMessage(error) });
+      throw error;
+    }
+  },
+  logout: () => {
+    setAccessToken(null);
+    set({ user: null, projects: [], currentId: null, authRequired: true, view: "projects", apiError: null });
+  },
   currentId: "ATL",
   view: "projects",
+  artifactKind: "frontend",
   setView: (v) => {
     const st = get();
     set({ view: v, prevView: v === "design" && st.view !== "design" ? st.view : st.prevView });
   },
-  addProject: (name, desc = "") => {
+  setArtifactCanvas: (kind) => set({ artifactKind: kind, view: "artifact" }),
+  addProject: async (name, desc = "") => {
     const cleanName = name.trim();
     if (!cleanName) return undefined;
+    if (apiEnabled) {
+      try {
+        const created = mapProject(await forgeApi.createProject(cleanName, desc.trim()));
+        set((st) => ({ projects: [created, ...st.projects], apiError: null }));
+        return created.id;
+      } catch (error) {
+        set({ apiError: errorMessage(error) });
+        throw error;
+      }
+    }
     const id = `PRJ-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     const project: Project = {
       id,
@@ -108,25 +178,48 @@ export const useStore = create<StoreState>((set, get) => ({
       updated: "now",
     };
     set((st) => ({ projects: [project, ...st.projects] }));
-    SCREENS.push({ name: `Design · ${id}`, w: 390, h: 720, projectId: id, nodes: [] });
-    void createCurrentWorkspaceProject(cleanName, desc.trim()).then((remote) => {
-      const persisted: Project = { ...project, id: remote.id, name: remote.name, type: remote.type, desc: remote.description, stage: remote.stage as Stage, prog: remote.progress, live: remote.live, updated: "now" };
-      const screen = SCREENS.find((item) => item.projectId === id); if (screen) { screen.projectId = remote.id; screen.name = `Design · ${remote.id}`; }
-      set((st) => ({ projects: st.projects.map((item) => item.id === id ? persisted : item), currentId: st.currentId === id ? remote.id : st.currentId }));
-    }).catch(() => { replaceScreens(SCREENS.filter((item) => item.projectId !== id)); set((st) => ({ projects: st.projects.filter((item) => item.id !== id) })); });
     return id;
   },
-  openProject: (id) => set({ currentId: id, view: "ai" }),
+  openProject: (id) => {
+    set({ currentId: id, view: "ai", apiError: null });
+    if (apiEnabled) void loadProjectDetail(id, set);
+  },
   current: () => get().projects.find((p) => p.id === get().currentId),
   aiLog: {},
-  sendChat: (text) => {
+  sendChat: async (text, model, attachments) => {
     const st = get();
-    const current = st.current();
-    if (!current) return;
-    const p = cloneProject(current);
+    const p = st.current();
+    if (!p) return;
     const now = Date.now();
     const log = st.aiLog[p.id] || [{ role: "ai" as const, text: `Requirement is live for ${p.name}. Ask me to draft the brief, generate the PRD, or run an impact analysis.`, at: now - 1 }];
     log.push({ role: "user", text, at: now });
+    set({ aiLog: { ...st.aiLog, [p.id]: [...log] }, apiError: null });
+    if (apiEnabled) {
+      try {
+        const response = await forgeApi.chat(p.id, text, model, attachments);
+        const projects = get().projects.map((project) => project.id === p.id ? {
+          ...project,
+          req: true,
+          requirement: mapRequirement(response.requirement),
+          reqVersion: response.requirement.version || (project.reqVersion || 0) + 1,
+          reqUpdatedAt: Date.now(),
+        } : project);
+        const currentLog = get().aiLog[p.id] || log;
+        set({
+          projects,
+          aiLog: { ...get().aiLog, [p.id]: [...currentLog, { role: "ai", text: response.text, at: Date.now() }] },
+          apiError: null,
+        });
+      } catch (error) {
+        const currentLog = get().aiLog[p.id] || log;
+        set({
+          aiLog: { ...get().aiLog, [p.id]: [...currentLog, { role: "ai", text: `Request failed: ${errorMessage(error)}`, at: Date.now() }] },
+          apiError: errorMessage(error),
+        });
+        throw error;
+      }
+      return;
+    }
     if (!p.req) {
       p.requirement = generateRequirement(p);
       log.push({ role: "ai", text: `Requirement created for ${p.name}. PRD, user stories, FR/NFR, acceptance criteria, and business rules are written and live in the panel.`, at: Date.now() });
@@ -134,39 +227,102 @@ export const useStore = create<StoreState>((set, get) => ({
       applyReqEdit(p, text);
       log.push({ role: "ai", text: aiReply(p, text), at: Date.now() });
     }
-    set({
-      projects: st.projects.map((project) => project.id === p.id ? p : project),
-      aiLog: { ...st.aiLog, [p.id]: [...log] },
-    });
-    void assistantMessage(p.id, text).then((remote) => {
-      set((latest) => ({ projects: latest.projects.map((project) => project.id === p.id ? { ...project, req: true, requirement: remote.requirement.content, reqVersion: remote.requirement.version, reqUpdatedAt: Date.now() } : project), aiLog: { ...latest.aiLog, [p.id]: [...(latest.aiLog[p.id] || []), { role: "ai", text: remote.message, at: Date.now() }] } }));
-    }).catch(() => undefined);
+    set({ aiLog: { ...st.aiLog, [p.id]: [...log] } });
   },
-  sendToKanban: (id) => {
+  sendToKanban: async (id) => {
+    if (apiEnabled) {
+      try {
+        const result = await forgeApi.syncKanban(id);
+        await loadProjectDetail(id, set);
+        set({ apiError: null });
+        return result;
+      } catch (error) {
+        set({ apiError: errorMessage(error) });
+        throw error;
+      }
+      return;
+    }
     const st = get();
-    const current = st.projects.find((x) => x.id === id);
-    if (!current?.requirement) return;
-    const p = cloneProject(current);
+    const p = st.projects.find((x) => x.id === id);
+    if (!p || !p.requirement) return;
     backfillKanban(p);
     clearNewFlags(p);
     const version = p.reqVersion || 1;
     p.kanbanSyncedVer = version;
-    const snapshot = cloneRequirement(p.requirement!);
+    const snapshot = cloneRequirement(p.requirement);
     p.requirementHistory = [
       ...(p.requirementHistory || []).filter((entry) => entry.version !== version),
       { version, requirement: snapshot, sentAt: Date.now() },
     ].sort((a, b) => a.version - b.version);
-    set({ projects: st.projects.map((project) => project.id === id ? p : project) });
-    void syncKanban(id).then((remote) => {
-      const kanban = { backlog: [] as KanbanCard[], todo: [] as KanbanCard[], progress: [] as KanbanCard[], done: [] as KanbanCard[] };
-      remote.cards.forEach((card) => { const status = card.status === "BACKLOG" ? "backlog" : card.status === "TODO" ? "todo" : card.status === "PROGRESS" ? "progress" : "done"; kanban[status].push({ id: card.id, title: card.title, canvas: card.canvas, reqRef: card.requirementRef || undefined, status }); });
-      set((latest) => ({ projects: latest.projects.map((project) => project.id === id ? { ...project, kanban, kanbanSyncedVer: remote.version } : project) }));
-    }).catch(() => undefined);
+    set({ projects: [...st.projects] });
   },
+  moveKanbanCard: async (projectId, cardId, targetStatus, requestedIndex) => {
+    const state = get();
+    const project = state.projects.find((item) => item.id === projectId);
+    if (!project?.kanban) return;
+    const statuses: KanbanCard["status"][] = ["backlog", "todo", "progress", "done"];
+    const previous = Object.fromEntries(statuses.map((status) => [status, project.kanban![status].map((card) => ({ ...card }))])) as NonNullable<Project["kanban"]>;
+    const next = Object.fromEntries(statuses.map((status) => [status, project.kanban![status].map((card) => ({ ...card }))])) as NonNullable<Project["kanban"]>;
+    let moving: KanbanCard | undefined;
+    let sourceStatus: KanbanCard["status"] | undefined;
+    let sourceIndex = -1;
+    for (const status of statuses) {
+      const found = next[status].findIndex((card) => card.id === cardId);
+      if (found >= 0) {
+        sourceStatus = status;
+        sourceIndex = found;
+        moving = next[status].splice(found, 1)[0];
+        break;
+      }
+    }
+    if (!moving || moving.obsolete) return;
+    let targetIndex = Math.max(0, Math.min(requestedIndex, next[targetStatus].length));
+    if (sourceStatus === targetStatus && sourceIndex < requestedIndex) targetIndex = Math.max(0, targetIndex - 1);
+    moving.status = targetStatus;
+    next[targetStatus].splice(targetIndex, 0, moving);
+    for (const status of statuses) next[status].forEach((card, order) => { card.status = status; card.order = order; });
+    set((current) => ({ projects: current.projects.map((item) => item.id === projectId ? { ...item, kanban: next } : item), apiError: null }));
+    try {
+      const cards = statuses.flatMap((status) => next[status].map((card, order) => ({ id: card.id, status, order })));
+      const persisted = await forgeApi.reorderKanban(projectId, cards);
+      set((current) => ({ projects: current.projects.map((item) => item.id === projectId ? { ...item, kanban: persisted } : item), apiError: null }));
+    } catch (error) {
+      set((current) => ({ projects: current.projects.map((item) => item.id === projectId ? { ...item, kanban: previous } : item), apiError: errorMessage(error) }));
+      throw error;
+    }
+  },
+  refreshProject: async (id) => loadProjectDetail(id, set),
 }));
 
-function cloneProject(project: Project): Project {
-  return JSON.parse(JSON.stringify(project)) as Project;
+async function loadProjectDetail(
+  id: string,
+  set: (partial: Partial<StoreState> | ((state: StoreState) => Partial<StoreState>)) => void,
+) {
+  try {
+    const [projectPayload, chatPayload, requirementPayload] = await Promise.all([
+      forgeApi.getProject(id),
+      forgeApi.getChatHistory(id),
+      forgeApi.getRequirementHistory(id),
+    ]);
+    const detail = {
+      ...mapProject(projectPayload),
+      requirementHistory: mapRequirementSnapshots(requirementPayload),
+    };
+    set((state) => ({
+      projects: state.projects.map((project) => project.id === id ? { ...project, ...detail } : project),
+      aiLog: chatPayload.items.length
+        ? { ...state.aiLog, [id]: chatPayload.items.map(({ role, text, at }) => ({ role, text, at })) }
+        : state.aiLog,
+      apiError: null,
+    }));
+  } catch (error) {
+    set({ apiError: errorMessage(error) });
+    if (error instanceof ApiError && error.status === 401) set({ authRequired: true, user: null });
+  }
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unexpected API error";
 }
 
 function aiReply(p: Project, text: string): string {
@@ -337,13 +493,26 @@ function seedScreens(): Screen[] {
 }
 
 export const SCREENS = seedScreens();
-const INITIAL_CANVAS_SNAPSHOT = JSON.stringify({ screens: SCREENS, guides: [], zoom: 1, pan: { x: 0, y: 0 } });
+const ATLAS_TEMPLATE_NODES = JSON.parse(JSON.stringify(SCREENS.find((screen) => screen.name === "Atlas Design")?.nodes || [])) as CNode[];
+const DEFAULT_SCREEN_SETTINGS: ScreenSettings = {
+  canvasBg: "#f5f5f5",
+  canvasBgOpacity: 1,
+  showCanvasBg: true,
+  showAlignmentGrid: false,
+  showRulers: true,
+  showMinimap: false,
+};
 
 interface CanvasStore {
   canvas: { screen: string; mode: "board" | "screen"; selIds: string[]; history: HistoryEntry[]; idx: number; canvasBg: string; canvasBgOpacity: number; showCanvasBg: boolean; zoom: number; pan: { x: number; y: number }; guides: Guide[]; showAlignmentGrid: boolean; showRulers: boolean; showMinimap: boolean; clipboard: CNode[] | null };
   activeTool: Tool;
+  saveStatus: "idle" | "saving" | "saved" | "error";
   setActiveTool: (t: Tool) => void;
   setCanvasScreen: (s: string) => void;
+  createScreen: (name: string) => Promise<void>;
+  renameScreen: (name: string) => Promise<void>;
+  duplicateScreen: (name: string) => Promise<void>;
+  deleteScreen: () => Promise<void>;
   setCanvasMode: (m: "board" | "screen") => void;
   setSel: (id: string | null, additive?: boolean, range?: boolean) => void;
   clearSel: () => void;
@@ -355,6 +524,8 @@ interface CanvasStore {
   toggleMinimap: () => void;
   addNode: (type: NodeType, geom?: { x: number; y: number; w?: number; h?: number }) => void;
   autoParentNode: (id: string) => void;
+  dropNodeInAutoLayout: (id: string, point: { x: number; y: number }, position?: { x: number; y: number }) => boolean;
+  previewAutoLayoutReorder: (id: string, point: { x: number; y: number }) => boolean;
   duplicateSelected: () => void;
   deleteNode: (id: string) => void;
   updateNode: (id: string, props: Partial<CNode["props"]>) => void;
@@ -371,6 +542,7 @@ interface CanvasStore {
   copySelected: () => void;
   cutSelected: () => void;
   pasteClipboard: () => void;
+  replaceSelectedWithClipboard: () => void;
   importFigmaClipboard: (payload: unknown, point: { x: number; y: number }) => number;
   addShape: (kind: "rect" | "line" | "arrow" | "ellipse" | "polygon" | "star" | "frame", geom?: { x: number; y: number; w?: number; h?: number }) => void;
   setCanvasBg: (color: string) => void;
@@ -391,23 +563,10 @@ interface CanvasStore {
 
 const MIN_W = 1;
 const MIN_H = 1;
-const MAX_HISTORY_ENTRIES = 100;
-const MAX_HISTORY_BYTES = 8 * 1024 * 1024;
 
 function uuid(prefix = "n") {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return prefix + Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
-
-function historyBytes(history: HistoryEntry[]) {
-  return history.reduce((total, entry) => total + String(entry.payload).length + (entry.inverse ? String(entry.inverse).length : 0), 0);
-}
-
-function trimHistory(history: HistoryEntry[]) {
-  while (history.length > 1 && (history.length > MAX_HISTORY_ENTRIES || historyBytes(history) > MAX_HISTORY_BYTES)) {
-    const removed = history.shift()!;
-    history[0].inverse = removed.payload;
-  }
 }
 
 type FigmaPaint = {
@@ -670,65 +829,62 @@ function frameLocations(nodes: CNode[], baseX = 0, baseY = 0): NodeLocation[] {
 }
 
 function measureTextNode(node: CNode, text: string) {
-  const size = node.props.size ?? node.props.fontSize ?? 14;
-  const family = node.props.fontFamily ?? "sans-serif";
-  const weight = node.props.weight ?? 400;
-  const letterSpacing = node.props.letterSpacing ?? 0;
-  const lines = (text || " ").split("\n");
-  let width = 0;
-  if (typeof document !== "undefined") {
-    const context = document.createElement("canvas").getContext("2d");
-    if (context) {
-      context.font = `${weight} ${size}px ${family}`;
-      width = Math.max(...lines.map((line) => context.measureText(line || " ").width + Math.max(0, line.length - 1) * letterSpacing));
-    }
-  }
-  if (!width) width = Math.max(...lines.map((line) => Math.max(1, line.length) * size * 0.58 + Math.max(0, line.length - 1) * letterSpacing));
-  const lineHeight = node.props.lineHeight ?? size * 1.2;
-  return {
-    w: Math.max(1, Math.ceil(text ? width + 1 : 1)),
-    h: Math.max(1, Math.ceil(lines.length * lineHeight)),
-  };
+  return measureCanvasText(node, text);
 }
 
 function resizeAutoLayoutContainer(node: CNode) {
-  if (node.type !== "frame" || !node.props.autoLayout || !node.children?.length) return;
-  const base = node.props.pad ?? 0;
-  const horizontal = node.props.padH ?? base;
-  const vertical = node.props.padV ?? base;
-  const left = node.props.padLeft ?? horizontal;
-  const right = node.props.padRight ?? horizontal;
-  const top = node.props.padTop ?? vertical;
-  const bottom = node.props.padBottom ?? vertical;
-  const gap = Math.max(0, node.props.gap ?? 0);
-  const direction = node.props.direction === "col" ? "col" : "row";
-  const totalMain = node.children.reduce((sum, child) => sum + (direction === "row" ? child.w : child.h), 0) + gap * Math.max(0, node.children.length - 1);
-  const maxCross = Math.max(...node.children.map((child) => direction === "row" ? child.h : child.w));
-  const hugWidth = direction === "row" ? left + totalMain + right : left + maxCross + right;
-  const hugHeight = direction === "row" ? top + maxCross + bottom : top + totalMain + bottom;
-  if (node.props.layoutSizingHorizontal !== "fixed") node.w = Math.max(MIN_W, hugWidth);
-  if (node.props.layoutSizingVertical !== "fixed") node.h = Math.max(MIN_H, hugHeight);
+  layoutAutoLayout(node);
+}
 
-  const innerMain = direction === "row" ? Math.max(0, node.w - left - right) : Math.max(0, node.h - top - bottom);
-  const innerCross = direction === "row" ? Math.max(0, node.h - top - bottom) : Math.max(0, node.w - left - right);
-  const freeMain = Math.max(0, innerMain - totalMain);
-  const justify = node.props.justify ?? "start";
-  const align = node.props.align ?? "start";
-  const distributedGap = justify === "between" && node.children.length > 1 ? gap + freeMain / (node.children.length - 1) : gap;
-  let cursor = (direction === "row" ? left : top) + (justify === "center" ? freeMain / 2 : justify === "end" ? freeMain : 0);
-  node.children.forEach((child) => {
-    const childCross = direction === "row" ? child.h : child.w;
-    const crossOffset = align === "center" ? (innerCross - childCross) / 2 : align === "end" ? innerCross - childCross : 0;
-    if (direction === "row") {
-      child.x = cursor;
-      child.y = top + Math.max(0, crossOffset);
-      cursor += child.w + distributedGap;
-    } else {
-      child.x = left + Math.max(0, crossOffset);
-      child.y = cursor;
-      cursor += child.h + distributedGap;
-    }
-  });
+export function findParentNode(screen: Screen, id: string) {
+  return findNodeLocation(screen.nodes, id)?.parent ?? null;
+}
+
+function relayoutNodeAndAncestors(screen: Screen, id: string) {
+  let currentId: string | undefined = id;
+  const visited = new Set<string>();
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    const location = findNodeLocation(screen.nodes, currentId);
+    if (!location) break;
+    if (location.node.props.autoLayout) resizeAutoLayoutContainer(location.node);
+    currentId = location.parent?.id;
+  }
+}
+
+export type AutoLayoutDropPreview = {
+  parentId: string;
+  index: number;
+  direction: "row" | "col";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
+
+export function getAutoLayoutDropPreview(screen: Screen, draggedId: string, point: { x: number; y: number }): AutoLayoutDropPreview | null {
+  const dragged = findNodeLocation(screen.nodes, draggedId);
+  if (!dragged) return null;
+  const target = frameLocations(screen.nodes)
+    .filter(({ node, absX, absY }) => node.props.autoLayout && node.id !== draggedId && !containsNode(dragged.node, node.id)
+      && point.x >= absX && point.x <= absX + node.w && point.y >= absY && point.y <= absY + node.h)
+    .sort((a, b) => a.node.w * a.node.h - b.node.w * b.node.h)[0];
+  if (!target) return null;
+  const direction = target.node.props.direction === "col" ? "col" : "row";
+  const children = (target.node.children ?? []).filter((child) => child.id !== draggedId);
+  const localMain = direction === "row" ? point.x - target.absX : point.y - target.absY;
+  let index = children.findIndex((child) => localMain < (direction === "row" ? child.x + child.w / 2 : child.y + child.h / 2));
+  if (index < 0) index = children.length;
+  const base = target.node.props.pad ?? 0;
+  const padH = target.node.props.padH ?? base;
+  const padV = target.node.props.padV ?? base;
+  const start = direction === "row" ? (target.node.props.padLeft ?? padH) : (target.node.props.padTop ?? padV);
+  const end = direction === "row" ? target.node.w - (target.node.props.padRight ?? padH) : target.node.h - (target.node.props.padBottom ?? padV);
+  const marker = index === 0 ? start : index >= children.length
+    ? end : direction === "row" ? children[index].x - (target.node.props.gap ?? 10) / 2 : children[index].y - (target.node.props.gap ?? 10) / 2;
+  return direction === "row"
+    ? { parentId: target.node.id, index, direction, x: target.absX + marker, y: target.absY, w: 2, h: target.node.h }
+    : { parentId: target.node.id, index, direction, x: target.absX, y: target.absY + marker, w: target.node.w, h: 2 };
 }
 
 function alignNodeOrChildren(nodes: CNode[], node: CNode) {
@@ -788,8 +944,265 @@ function toLocal(n: CNode, p: { x: number; y: number }) {
 
 export function getScreen(name: string): Screen | undefined { return SCREENS.find((s) => s.name === name); }
 
-export function replaceScreens(screens: Screen[]) {
-  SCREENS.splice(0, SCREENS.length, ...JSON.parse(JSON.stringify(screens)) as Screen[]);
+const canvasSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const canvasSaveQueues = new Map<string, Promise<void>>();
+const canvasDesiredRevisions = new Map<string, number>();
+const lastRemoteHistoryId = new Map<string, string>();
+
+type CompactCanvasSnapshot = {
+  version: 2;
+  screen: Pick<Screen, "id" | "projectId" | "name" | "w" | "h" | "nodes">;
+  guides: Guide[];
+  zoom: number;
+  pan: { x: number; y: number };
+};
+
+function snapshotString(screen: Screen, guides: Guide[], zoom: number, pan: { x: number; y: number }) {
+  const snapshot: CompactCanvasSnapshot = {
+    version: 2,
+    screen: { id: screen.id, projectId: screen.projectId, name: screen.name, w: screen.w, h: screen.h, nodes: screen.nodes },
+    guides,
+    zoom,
+    pan,
+  };
+  return JSON.stringify(snapshot);
+}
+
+function normalizeSnapshotValue(value: unknown, fallback: Screen, guides: Guide[], zoom: number, pan: { x: number; y: number }) {
+  try {
+    const parsed = (typeof value === "string" ? JSON.parse(value) : value) as CompactCanvasSnapshot & { screens?: Screen[] };
+    if (parsed?.version === 2 && parsed.screen?.nodes) return JSON.stringify(parsed);
+    const source = parsed?.screens?.find((item) => (fallback.id && item.id === fallback.id) || item.name === fallback.name) || fallback;
+    return snapshotString(source, parsed?.guides || guides, parsed?.zoom || zoom, parsed?.pan || pan);
+  } catch {
+    return snapshotString(fallback, guides, zoom, pan);
+  }
+}
+
+function applySnapshotValue(value: unknown, currentScreen: Screen) {
+  try {
+    const parsed = (typeof value === "string" ? JSON.parse(value) : value) as CompactCanvasSnapshot & { screens?: Screen[] };
+    const source = parsed.version === 2
+      ? parsed.screen
+      : parsed.screens?.find((item) => (currentScreen.id && item.id === currentScreen.id) || item.name === currentScreen.name);
+    if (!source) return null;
+    const target = SCREENS.find((item) => (source.id && item.id === source.id) || item.name === source.name) || currentScreen;
+    target.nodes = source.nodes;
+    target.w = source.w;
+    target.h = source.h;
+    return { guides: parsed.guides || [], zoom: parsed.zoom || 1, pan: parsed.pan || { x: 0, y: 0 } };
+  } catch {
+    return null;
+  }
+}
+
+function resolvedSettings(settings?: Partial<ScreenSettings>): ScreenSettings {
+  return { ...DEFAULT_SCREEN_SETTINGS, ...(settings || {}) };
+}
+
+function syncCanvasToScreen(screen: Screen | undefined, canvas: CanvasStore["canvas"]) {
+  if (!screen) return;
+  screen.guides = canvas.guides;
+  screen.history = canvas.history;
+  screen.settings = {
+    ...resolvedSettings(screen.settings),
+    canvasBg: canvas.canvasBg,
+    canvasBgOpacity: canvas.canvasBgOpacity,
+    showCanvasBg: canvas.showCanvasBg,
+    showAlignmentGrid: canvas.showAlignmentGrid,
+    showRulers: canvas.showRulers,
+    showMinimap: canvas.showMinimap,
+    zoom: canvas.zoom,
+    pan: canvas.pan,
+  };
+}
+
+function canvasForScreen(canvas: CanvasStore["canvas"], screen: Screen, history: HistoryEntry[] = []) {
+  layoutCanvasNodes(screen.nodes);
+  const settings = resolvedSettings(screen.settings);
+  const baselinePayload = snapshotString(screen, screen.guides || [], settings.zoom || 1, settings.pan || { x: 0, y: 0 });
+  const baseline: HistoryEntry = {
+    id: `baseline:${screen.id || screen.name}`,
+    timestamp: Date.now(),
+    action: "UPDATE_FRAME" as const,
+    payload: baselinePayload,
+    inverse: baselinePayload,
+    affectedIds: [],
+  };
+  const effectiveHistory = history[0]?.id.startsWith("baseline:") ? history : [baseline, ...history];
+  return {
+    ...canvas,
+    screen: screen.name,
+    mode: "screen" as const,
+    selIds: [],
+    guides: screen.guides || [],
+    history: effectiveHistory,
+    idx: effectiveHistory.length - 1,
+    canvasBg: settings.canvasBg,
+    canvasBgOpacity: settings.canvasBgOpacity,
+    showCanvasBg: settings.showCanvasBg,
+    showAlignmentGrid: settings.showAlignmentGrid,
+    showRulers: settings.showRulers,
+    showMinimap: settings.showMinimap,
+    zoom: settings.zoom || 1,
+    pan: settings.pan || { x: 0, y: 0 },
+  };
+}
+
+const remoteCanvasLoads = new Map<string, Promise<void>>();
+const remoteCanvasProgress = new Map<string, number>();
+const remoteCanvasProgressListeners = new Map<string, Set<(progress: number) => void>>();
+
+function reportRemoteCanvasProgress(projectId: string, progress: number) {
+  const next = Math.max(0, Math.min(100, Math.round(progress)));
+  remoteCanvasProgress.set(projectId, next);
+  remoteCanvasProgressListeners.get(projectId)?.forEach((listener) => listener(next));
+}
+
+export function loadRemoteCanvas(projectId: string, onProgress?: (progress: number) => void) {
+  if (onProgress) {
+    const listeners = remoteCanvasProgressListeners.get(projectId) ?? new Set();
+    listeners.add(onProgress);
+    remoteCanvasProgressListeners.set(projectId, listeners);
+    onProgress(remoteCanvasProgress.get(projectId) ?? 0);
+  }
+  let load = remoteCanvasLoads.get(projectId);
+  if (!load) {
+    reportRemoteCanvasProgress(projectId, 3);
+    load = loadRemoteCanvasOnce(projectId).finally(() => {
+      if (remoteCanvasLoads.get(projectId) === load) remoteCanvasLoads.delete(projectId);
+    });
+    remoteCanvasLoads.set(projectId, load);
+  }
+  return load.finally(() => {
+    if (!onProgress) return;
+    const listeners = remoteCanvasProgressListeners.get(projectId);
+    listeners?.delete(onProgress);
+    if (!listeners?.size) remoteCanvasProgressListeners.delete(projectId);
+  });
+}
+
+async function loadRemoteCanvasOnce(projectId: string) {
+  if (!apiEnabled) return;
+  reportRemoteCanvasProgress(projectId, 8);
+  let screens = await forgeApi.listScreens(projectId);
+  reportRemoteCanvasProgress(projectId, 18);
+  if (!screens.length) {
+    screens = [await forgeApi.createScreen(projectId, "Design Canvas")];
+    reportRemoteCanvasProgress(projectId, 25);
+  }
+  let completedScreens = 0;
+  const documents = await Promise.all(screens.map(async (screen) => {
+    const [document, remoteHistory] = await Promise.all([
+      forgeApi.getScreenDocument(screen.id),
+      forgeApi.getScreenHistory(screen.id),
+    ]);
+    completedScreens += 1;
+    reportRemoteCanvasProgress(projectId, 25 + completedScreens / Math.max(1, screens.length) * 55);
+    const fallback: Screen = { id: screen.id, projectId, name: screen.name, w: screen.w, h: screen.h, nodes: Array.isArray(document.nodes) ? document.nodes : [] };
+    const settings = resolvedSettings(document.settings || screen.settings);
+    const history: HistoryEntry[] = remoteHistory.slice().reverse().map((entry) => ({
+      id: entry.id,
+      timestamp: new Date(entry.createdAt).getTime(),
+      action: entry.action,
+      payload: normalizeSnapshotValue(entry.payload, fallback, document.guides || [], settings.zoom || 1, settings.pan || { x: 0, y: 0 }),
+      inverse: normalizeSnapshotValue(entry.inverse, fallback, document.guides || [], settings.zoom || 1, settings.pan || { x: 0, y: 0 }),
+      affectedIds: entry.affectedIds,
+    }));
+    return { screen, document, history };
+  }));
+  reportRemoteCanvasProgress(projectId, 85);
+  const remoteScreens: Screen[] = documents.map(({ screen, document, history }) => ({
+    id: screen.id,
+    projectId,
+    name: screen.name,
+    w: screen.w,
+    h: screen.h,
+    nodes: Array.isArray(document.nodes) ? document.nodes : [],
+    guides: document.guides || [],
+    settings: document.settings || screen.settings || DEFAULT_SCREEN_SETTINGS,
+    revision: document.revision ?? screen.revision ?? 0,
+    history,
+  }));
+  reportRemoteCanvasProgress(projectId, 90);
+
+  const project = useStore.getState().projects.find((item) => item.id === projectId);
+  if (project?.name.trim().toLowerCase() === "atlas" && remoteScreens.every((screen) => screen.nodes.length === 0)) {
+    const target = remoteScreens[0];
+    const targetDocument = documents[0];
+    if (target && targetDocument) {
+      target.name = "Atlas Login & Register";
+      target.w = 3000;
+      target.h = 1024;
+      target.nodes = JSON.parse(JSON.stringify(ATLAS_TEMPLATE_NODES)) as CNode[];
+      await Promise.all([
+        forgeApi.saveScreenNodes(target.id!, target.nodes),
+        forgeApi.updateScreen(target.id!, { name: target.name, w: target.w, h: target.h, settings: resolvedSettings(target.settings) }),
+      ]);
+      targetDocument.screen.name = target.name;
+      reportRemoteCanvasProgress(projectId, 96);
+    }
+  }
+  const kept = SCREENS.filter((screen) => screen.projectId !== projectId);
+  SCREENS.splice(0, SCREENS.length, ...kept, ...remoteScreens);
+  const first = remoteScreens[0];
+  if (first) {
+    const firstHistory = documents.find((item) => item.screen.id === first.id)?.history || [];
+    if (firstHistory.length) lastRemoteHistoryId.set(first.id!, firstHistory[firstHistory.length - 1].id);
+    useCanvas.setState((state) => ({
+      canvas: canvasForScreen(state.canvas, first, firstHistory),
+      saveStatus: "saved",
+    }));
+  }
+  reportRemoteCanvasProgress(projectId, 100);
+}
+
+function scheduleRemoteCanvasSave() {
+  if (!apiEnabled || typeof window === "undefined") return;
+  const projectId = useStore.getState().currentId;
+  const state = useCanvas.getState();
+  const screen = getScreen(state.canvas.screen);
+  if (!projectId || !screen?.id || screen.projectId !== projectId) return;
+  syncCanvasToScreen(screen, state.canvas);
+  const existing = canvasSaveTimers.get(screen.id);
+  if (existing) clearTimeout(existing);
+  useCanvas.setState({ saveStatus: "saving" });
+  canvasSaveTimers.set(screen.id, setTimeout(() => {
+    canvasSaveTimers.delete(screen.id!);
+    const latestState = useCanvas.getState();
+    const latestScreen = SCREENS.find((item) => item.id === screen.id) || screen;
+    if (latestState.canvas.screen === latestScreen.name) syncCanvasToScreen(latestScreen, latestState.canvas);
+    const history = latestScreen.history || latestState.canvas.history;
+    const latestHistory = history.length ? history[history.length - 1] : undefined;
+    const includeHistory = latestHistory && lastRemoteHistoryId.get(latestScreen.id!) !== latestHistory.id;
+    const revision = Math.max(latestScreen.revision || 0, canvasDesiredRevisions.get(latestScreen.id!) || 0) + 1;
+    latestScreen.revision = revision;
+    canvasDesiredRevisions.set(latestScreen.id!, revision);
+    const document = {
+      revision,
+      name: latestScreen.name,
+      w: Math.round(latestScreen.w),
+      h: Math.round(latestScreen.h),
+      nodes: JSON.parse(JSON.stringify(latestScreen.nodes)) as CNode[],
+      guides: JSON.parse(JSON.stringify(latestScreen.guides || [])) as Guide[],
+      settings: { ...resolvedSettings(latestScreen.settings) },
+      ...(includeHistory ? { history: { action: latestHistory.action, payload: latestHistory.payload, inverse: latestHistory.inverse, affectedIds: latestHistory.affectedIds } } : {}),
+    };
+    const previous = canvasSaveQueues.get(latestScreen.id!) || Promise.resolve();
+    const job = previous.catch(() => undefined).then(async () => {
+      const saved = await forgeApi.saveScreenDocument(latestScreen.id!, document);
+      if (saved.stale) throw new Error("Canvas changed in another session. Reload before saving again.");
+      if (includeHistory) lastRemoteHistoryId.set(latestScreen.id!, latestHistory.id);
+      latestScreen.revision = Math.max(latestScreen.revision || 0, saved.revision);
+      if (canvasDesiredRevisions.get(latestScreen.id!) === revision) useCanvas.setState({ saveStatus: "saved" });
+    }).catch((error) => {
+      if (canvasDesiredRevisions.get(latestScreen.id!) === revision) useCanvas.setState({ saveStatus: "error" });
+      useStore.setState({ apiError: errorMessage(error) });
+    }).finally(() => {
+      if (canvasSaveQueues.get(latestScreen.id!) === job) canvasSaveQueues.delete(latestScreen.id!);
+    });
+    canvasSaveQueues.set(latestScreen.id!, job);
+  }, 600));
 }
 
 export function findNodeById(screen: Screen, id: string): CNode | undefined {
@@ -805,10 +1218,68 @@ export function findNodeById(screen: Screen, id: string): CNode | undefined {
 export const useCanvas = create<CanvasStore>((set, get) => ({
   canvas: { screen: "Dashboard", mode: "screen", selIds: [], history: [], idx: -1, canvasBg: "#f5f5f5", canvasBgOpacity: 1, showCanvasBg: true, zoom: 1, pan: { x: 0, y: 0 }, guides: [], showAlignmentGrid: false, showRulers: true, showMinimap: false, clipboard: null as CNode[] | null, tool: "move" },
   activeTool: "move",
+  saveStatus: "idle",
   setActiveTool: (t) => set({ activeTool: t }),
   setCanvasScreen: (s) => {
-    const screen = getScreen(s)?.name ?? SCREENS[0]?.name ?? "Dashboard";
-    set({ canvas: { ...get().canvas, screen, mode: "screen", selIds: [] } });
+    const current = get();
+    const previous = getScreen(current.canvas.screen);
+    syncCanvasToScreen(previous, current.canvas);
+    const next = getScreen(s);
+    if (!next) return;
+    set({ canvas: canvasForScreen(current.canvas, next, next.history || []), saveStatus: "saved" });
+  },
+  createScreen: async (name) => {
+    const projectId = useStore.getState().currentId;
+    if (!projectId || !name.trim()) return;
+    const created = await forgeApi.createScreen(projectId, name.trim(), 1440, 1024, DEFAULT_SCREEN_SETTINGS);
+    const screen: Screen = { ...created, projectId, nodes: [], guides: [], settings: created.settings || DEFAULT_SCREEN_SETTINGS, history: [] };
+    SCREENS.push(screen);
+    set((state) => ({ canvas: canvasForScreen(state.canvas, screen), saveStatus: "saved" }));
+  },
+  renameScreen: async (name) => {
+    const state = get();
+    const screen = getScreen(state.canvas.screen);
+    const nextName = name.trim();
+    if (!screen?.id || !nextName || nextName === screen.name) return;
+    await forgeApi.updateScreen(screen.id, { name: nextName });
+    screen.name = nextName;
+    set({ canvas: { ...state.canvas, screen: nextName }, saveStatus: "saved" });
+  },
+  duplicateScreen: async (name) => {
+    const state = get();
+    const source = getScreen(state.canvas.screen);
+    const nextName = name.trim();
+    if (!source?.id || !nextName) return;
+    syncCanvasToScreen(source, state.canvas);
+    await Promise.all([
+      forgeApi.saveScreenNodes(source.id, source.nodes),
+      forgeApi.saveScreenGuides(source.id, source.guides || []),
+      forgeApi.updateScreen(source.id, { settings: resolvedSettings(source.settings) }),
+    ]);
+    const created = await forgeApi.duplicateScreen(source.id, nextName);
+    const document = await forgeApi.getScreenDocument(created.id);
+    const duplicate: Screen = {
+      ...created,
+      projectId: source.projectId,
+      nodes: document.nodes || [],
+      guides: document.guides || [],
+      settings: document.settings || created.settings || DEFAULT_SCREEN_SETTINGS,
+      history: [],
+    };
+    SCREENS.push(duplicate);
+    set({ canvas: canvasForScreen(state.canvas, duplicate), saveStatus: "saved" });
+  },
+  deleteScreen: async () => {
+    const state = get();
+    const screen = getScreen(state.canvas.screen);
+    const projectId = useStore.getState().currentId;
+    const projectScreens = SCREENS.filter((item) => item.projectId === projectId);
+    if (!screen?.id || projectScreens.length <= 1) return;
+    await forgeApi.deleteScreen(screen.id);
+    const index = SCREENS.indexOf(screen);
+    if (index >= 0) SCREENS.splice(index, 1);
+    const next = SCREENS.find((item) => item.projectId === projectId)!;
+    set({ canvas: canvasForScreen(state.canvas, next, next.history || []), saveStatus: "saved" });
   },
   setCanvasMode: (m) => set({ canvas: { ...get().canvas, mode: m } }),
   setSel: (id, additive = false, range = false) => {
@@ -829,14 +1300,14 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
   },
   clearSel: () => set({ canvas: { ...get().canvas, selIds: [] } }),
   setZoom: (z) => set((st) => {
-    const clamped = Math.max(0.25, Math.min(32, z));
+    const clamped = Math.max(0.05, Math.min(32, z));
     return { canvas: { ...st.canvas, zoom: clamped } };
   }),
   setPan: (pan) => set((st) => ({ canvas: { ...st.canvas, pan } })),
-  setZoomPan: (zoom: number, pan: { x: number; y: number }) => set((st) => ({ canvas: { ...st.canvas, zoom: Math.max(0.25, Math.min(32, zoom)), pan } })),
-  toggleAlignmentGrid: () => set((st) => ({ canvas: { ...st.canvas, showAlignmentGrid: !st.canvas.showAlignmentGrid } })),
-  toggleRulers: () => set((st) => ({ canvas: { ...st.canvas, showRulers: !st.canvas.showRulers } })),
-  toggleMinimap: () => set((st) => ({ canvas: { ...st.canvas, showMinimap: !st.canvas.showMinimap } })),
+  setZoomPan: (zoom: number, pan: { x: number; y: number }) => set((st) => ({ canvas: { ...st.canvas, zoom: Math.max(0.05, Math.min(32, zoom)), pan } })),
+  toggleAlignmentGrid: () => { set((st) => ({ canvas: { ...st.canvas, showAlignmentGrid: !st.canvas.showAlignmentGrid } })); scheduleRemoteCanvasSave(); },
+  toggleRulers: () => { set((st) => ({ canvas: { ...st.canvas, showRulers: !st.canvas.showRulers } })); scheduleRemoteCanvasSave(); },
+  toggleMinimap: () => { set((st) => ({ canvas: { ...st.canvas, showMinimap: !st.canvas.showMinimap } })); scheduleRemoteCanvasSave(); },
   groupSelected: () => {
     const st = get();
     const ids = st.canvas.selIds.slice().sort((a, b) => {
@@ -879,8 +1350,8 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
       id: uuid("frame"),
       type: "frame",
       name: "Frame",
-      x: bounds.x,
-      y: bounds.y,
+      x: bounds.x - 10,
+      y: bounds.y - 10,
       w: bounds.w,
       h: bounds.h,
       rotation: 0,
@@ -890,8 +1361,8 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
         text: "",
         fill: "transparent",
         color: "#18181b",
-        pad: 0,
-        gap: 0,
+        pad: 10,
+        gap: 10,
         radius: 0,
         autoLayout: true,
         direction,
@@ -916,13 +1387,13 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     if (!location || location.node.locked || location.node.visible === false) return;
     const index = location.siblings.findIndex((node) => node.id === location.node.id);
     if (index < 0) return;
-    const child = { ...location.node, x: 0, y: 0 };
+    const child = { ...location.node, x: autoLayout ? 10 : 0, y: autoLayout ? 10 : 0 };
     const wrapper: CNode = {
       id: uuid("frame"),
       type: "frame",
       name: "Frame",
-      x: location.node.x,
-      y: location.node.y,
+      x: location.node.x - (autoLayout ? 10 : 0),
+      y: location.node.y - (autoLayout ? 10 : 0),
       w: location.node.w,
       h: location.node.h,
       rotation: 0,
@@ -932,7 +1403,8 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
         text: "",
         fill: "transparent",
         color: "#18181b",
-        pad: 0,
+        pad: autoLayout ? 10 : 0,
+        gap: autoLayout ? 10 : undefined,
         radius: 0,
         autoLayout,
         direction: "row",
@@ -955,7 +1427,7 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const inserted: string[] = [];
     target.forEach((g) => {
       const kids = g.children ?? [];
-      const local = kids.map((c) => ({ ...c, x: c.x + g.x, y: c.y + g.y }));
+      const local = kids.map((c) => ({ ...c, parentId: undefined, x: c.x + g.x, y: c.y + g.y }));
       local.forEach((c) => sc.nodes.push(c));
       inserted.push(...local.map((c) => c.id));
       sc.nodes = sc.nodes.filter((n) => n.id !== g.id);
@@ -987,7 +1459,9 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const sc = getScreen(st.canvas.screen); if (!sc) return {};
     const selected = st.canvas.selIds.map((id) => findNodeLocation(sc.nodes, id)).filter((item): item is NodeLocation => !!item && item.node.visible !== false && !item.node.locked);
     if (!selected.length) return;
+    const affectedParents = new Set(selected.map((item) => item.parent?.id).filter((id): id is string => !!id));
     selected.forEach((item) => removeNode(sc.nodes, item.node.id));
+    affectedParents.forEach((id) => relayoutNodeAndAncestors(sc, id));
     const next = { ...st.canvas, selIds: [], clipboard: selected.map((item) => ({ ...cloneNode(item.node), x: item.absX, y: item.absY })) };
     set({ canvas: next });
     get().pushHistory("DELETE_FRAME", selected.map((item) => item.node.id));
@@ -998,17 +1472,61 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const buf = st.canvas.clipboard; if (!buf?.length) return;
     const offset = 20;
     const ids: string[] = [];
+    const affectedParents = new Set<string>();
     buf.forEach((n) => {
-      const clone = cloneNode(n, offset);
+      const targetParent = n.parentId ? findNodeById(sc, n.parentId) : undefined;
+      const keepsAutoLayoutParent = !!targetParent?.props.autoLayout;
+      const clone = cloneNode(n, keepsAutoLayoutParent ? 0 : offset);
       ids.push(clone.id);
-      sc.nodes.push(clone);
+      if (keepsAutoLayoutParent && targetParent) {
+        clone.parentId = targetParent.id;
+        targetParent.children = [...(targetParent.children ?? []), clone];
+        affectedParents.add(targetParent.id);
+      } else {
+        clone.parentId = undefined;
+        sc.nodes.push(clone);
+      }
     });
+    affectedParents.forEach((id) => relayoutNodeAndAncestors(sc, id));
+    sc.nodes = [...sc.nodes];
     set({ canvas: { ...st.canvas, selIds: ids } });
     ids.forEach((id) => {
       const pasted = findNodeById(sc, id);
-      if (pasted && (pasted.type !== "frame" || pasted.props.shapeKind)) get().autoParentNode(id);
+      if (pasted && !pasted.parentId && (pasted.type !== "frame" || pasted.props.shapeKind)) get().autoParentNode(id);
     });
     get().pushHistory("PASTE", ids);
+  },
+  replaceSelectedWithClipboard: () => {
+    const st = get();
+    const sc = getScreen(st.canvas.screen); if (!sc || !st.canvas.clipboard?.length || !st.canvas.selIds.length) return;
+    const selectedSet = new Set(st.canvas.selIds);
+    const targets = st.canvas.selIds
+      .map((id) => findNodeLocation(sc.nodes, id))
+      .filter((item): item is NodeLocation => !!item && !item.node.locked && item.node.visible !== false)
+      .filter((item) => !st.canvas.selIds.some((otherId) => {
+        if (otherId === item.node.id || !selectedSet.has(otherId)) return false;
+        const other = findNodeById(sc, otherId);
+        return !!other && containsNode(other, item.node.id);
+      }));
+    if (!targets.length) return;
+    const replacements: string[] = [];
+    const affectedParents = new Set<string>();
+    targets.forEach((target, index) => {
+      const template = st.canvas.clipboard![index % st.canvas.clipboard!.length];
+      const replacement = cloneNode(template);
+      replacement.x = target.node.x;
+      replacement.y = target.node.y;
+      replacement.parentId = target.parent?.id;
+      const targetIndex = target.siblings.findIndex((node) => node.id === target.node.id);
+      if (targetIndex < 0) return;
+      target.siblings.splice(targetIndex, 1, replacement);
+      replacements.push(replacement.id);
+      if (target.parent?.props.autoLayout) affectedParents.add(target.parent.id);
+    });
+    affectedParents.forEach((id) => relayoutNodeAndAncestors(sc, id));
+    sc.nodes = [...sc.nodes];
+    set({ canvas: { ...st.canvas, selIds: replacements } });
+    get().pushHistory("PASTE", [...st.canvas.selIds, ...replacements]);
   },
   importFigmaClipboard: (payload, point) => {
     const envelope = payload && typeof payload === "object" ? payload as ForgeFigmaEnvelope : undefined;
@@ -1058,18 +1576,96 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const sourceIndex = location.siblings.findIndex((node) => node.id === id);
     if (sourceIndex < 0) return;
     location.siblings.splice(sourceIndex, 1);
+    if (location.parent?.props.autoLayout) resizeAutoLayoutContainer(location.parent);
     if (target) {
       location.node.x = location.absX - target.absX;
       location.node.y = location.absY - target.absY;
+      location.node.parentId = target.node.id;
       target.node.children = [...(target.node.children ?? []), location.node];
       target.node.expanded = true;
+      if (target.node.props.autoLayout) resizeAutoLayoutContainer(target.node);
     } else {
       location.node.x = location.absX;
       location.node.y = location.absY;
+      location.node.parentId = undefined;
       sc.nodes.push(location.node);
     }
     sc.nodes = [...sc.nodes];
     set({ canvas: { ...st.canvas } });
+  },
+  dropNodeInAutoLayout: (id, point, position) => {
+    const st = get();
+    const sc = getScreen(st.canvas.screen); if (!sc) return false;
+    const source = findNodeLocation(sc.nodes, id);
+    if (!source || source.node.locked) return false;
+    const preview = getAutoLayoutDropPreview(sc, id, point);
+    const sourceAutoParent = source.parent?.props.autoLayout ? source.parent : null;
+    if (!preview && !sourceAutoParent) return false;
+    if (preview && sourceAutoParent && preview.parentId === sourceAutoParent.id) {
+      const siblings = sourceAutoParent.children ?? [];
+      const from = siblings.findIndex((child) => child.id === id);
+      if (from < 0) return false;
+      const [moved] = siblings.splice(from, 1);
+      siblings.splice(Math.max(0, Math.min(preview.index, siblings.length)), 0, moved);
+      resizeAutoLayoutContainer(sourceAutoParent);
+      relayoutNodeAndAncestors(sc, sourceAutoParent.id);
+      sc.nodes = [...sc.nodes];
+      set({ canvas: { ...st.canvas, selIds: [id] } });
+      get().pushHistory("MOVE_FRAMES", [id, sourceAutoParent.id]);
+      return true;
+    }
+
+    const sourceParentId = source.parent?.id;
+    const sourceIndex = source.siblings.findIndex((child) => child.id === id);
+    if (sourceIndex < 0) return false;
+    source.siblings.splice(sourceIndex, 1);
+    source.node.parentId = undefined;
+    if (sourceAutoParent) {
+      if (source.node.props.layoutSizingHorizontal === "fill") source.node.props.layoutSizingHorizontal = "fixed";
+      if (source.node.props.layoutSizingVertical === "fill") source.node.props.layoutSizingVertical = "fixed";
+      resizeAutoLayoutContainer(sourceAutoParent);
+      relayoutNodeAndAncestors(sc, sourceAutoParent.id);
+    }
+
+    if (preview) {
+      const target = findNodeById(sc, preview.parentId);
+      if (!target?.props.autoLayout || target.id === id || containsNode(source.node, target.id)) {
+        source.siblings.splice(sourceIndex, 0, source.node);
+        return false;
+      }
+      source.node.parentId = target.id;
+      target.children = target.children ?? [];
+      target.children.splice(Math.max(0, Math.min(preview.index, target.children.length)), 0, source.node);
+      resizeAutoLayoutContainer(target);
+      relayoutNodeAndAncestors(sc, target.id);
+    } else {
+      source.node.x = position?.x ?? source.absX;
+      source.node.y = position?.y ?? source.absY;
+      sc.nodes.push(source.node);
+    }
+    sc.nodes = [...sc.nodes];
+    set({ canvas: { ...st.canvas, selIds: [id] } });
+    get().pushHistory("MOVE_FRAMES", [id, ...(sourceParentId ? [sourceParentId] : []), ...(preview ? [preview.parentId] : [])]);
+    return true;
+  },
+  previewAutoLayoutReorder: (id, point) => {
+    const st = get();
+    const sc = getScreen(st.canvas.screen); if (!sc) return false;
+    const source = findNodeLocation(sc.nodes, id);
+    const preview = getAutoLayoutDropPreview(sc, id, point);
+    if (!source?.parent?.props.autoLayout || !preview || preview.parentId !== source.parent.id) return false;
+    const siblings = source.parent.children ?? [];
+    const from = siblings.findIndex((child) => child.id === id);
+    if (from < 0) return false;
+    const [moved] = siblings.splice(from, 1);
+    const to = Math.max(0, Math.min(preview.index, siblings.length));
+    siblings.splice(to, 0, moved);
+    if (from === to) return false;
+    resizeAutoLayoutContainer(source.parent);
+    relayoutNodeAndAncestors(sc, source.parent.id);
+    sc.nodes = [...sc.nodes];
+    set({ canvas: { ...st.canvas } });
+    return true;
   },
   duplicateSelected: () => {
     const st = get();
@@ -1079,7 +1675,15 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
       .filter((item): item is NodeLocation => !!item && item.node.visible !== false && !item.node.locked)
       .map((item) => ({ item, copy: { ...cloneNode(item.node, 0, true), x: item.node.x + 20, y: item.node.y + 20 } }));
     if (!copies.length) return;
-    copies.forEach(({ item, copy }) => item.siblings.push(copy));
+    const affectedParents = new Set<string>();
+    copies.forEach(({ item, copy }) => {
+      const sourceIndex = item.siblings.findIndex((node) => node.id === item.node.id);
+      copy.parentId = item.parent?.id;
+      item.siblings.splice(sourceIndex < 0 ? item.siblings.length : sourceIndex + 1, 0, copy);
+      if (item.parent?.props.autoLayout) affectedParents.add(item.parent.id);
+    });
+    affectedParents.forEach((id) => relayoutNodeAndAncestors(sc, id));
+    sc.nodes = [...sc.nodes];
     set({ canvas: { ...st.canvas, selIds: copies.map(({ copy }) => copy.id) } });
     get().pushHistory("ADD_FRAME", copies.map(({ copy }) => copy.id));
   },
@@ -1099,6 +1703,7 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const isText = type === "text";
     const isImage = type === "image";
     const node: CNode = { id: uuid(), type, x: geom?.x ?? 40, y: geom?.y ?? 80 + sc.nodes.length * 8, w: geom?.w ?? (isFrame ? 360 : 200), h: geom?.h ?? (isFrame ? 640 : isText ? 28 : 120), rotation: 0, name: isFrame ? "Frame" : isText ? "Text" : type, props: { text: type === "button" ? "Button" : "", fill: isFrame ? "#ffffff" : isText || isImage ? "transparent" : type === "button" ? "#7c3aed" : "#fff", color: type === "button" ? "#fff" : "#18181b", placeholder: type === "input" ? "Input…" : undefined, pad: isFrame || isText || isImage ? 0 : 12, radius: isImage ? 0 : undefined, src: isImage ? "" : undefined, objectFit: isImage ? "cover" : undefined, imageScale: isImage ? 1 : undefined } };
+    if (isText) Object.assign(node.props, { fontFamily: "Inter", weight: 400, textAlign: "left", textVerticalAlign: "top", paragraphSpacing: 0, textDecoration: "none", textCase: "original", listStyle: "none" });
     if (isText) Object.assign(node, measureTextNode(node, ""));
     sc.nodes.push(node);
     set({ canvas: { ...st.canvas, selIds: [node.id] } });
@@ -1110,7 +1715,9 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const sc = getScreen(st.canvas.screen); if (!sc) return;
     const target = findNodeById(sc, id);
     if (!target || target.locked || target.visible === false) return;
+    const parentId = findNodeLocation(sc.nodes, id)?.parent?.id;
     removeNode(sc.nodes, id);
+    if (parentId) relayoutNodeAndAncestors(sc, parentId);
     sc.nodes = [...sc.nodes];
     set({ canvas: { ...st.canvas, selIds: st.canvas.selIds.filter((selectedId) => selectedId !== id) } });
     get().pushHistory("DELETE_FRAME", [id]);
@@ -1120,23 +1727,33 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const sc = getScreen(st.canvas.screen); if (!sc) return;
     const target = findNodeById(sc, id); if (!target || target.locked) return;
     const nextProps = { ...props };
+    if (target.type === "frame" && props.autoLayout === true && !target.props.autoLayout) {
+      nextProps.gap = props.gap ?? target.props.gap ?? 10;
+      nextProps.padTop = props.padTop ?? target.props.padTop ?? 10;
+      nextProps.padRight = props.padRight ?? target.props.padRight ?? 10;
+      nextProps.padBottom = props.padBottom ?? target.props.padBottom ?? 10;
+      nextProps.padLeft = props.padLeft ?? target.props.padLeft ?? 10;
+      nextProps.layoutSizingHorizontal = props.layoutSizingHorizontal ?? target.props.layoutSizingHorizontal ?? "hug";
+      nextProps.layoutSizingVertical = props.layoutSizingVertical ?? target.props.layoutSizingVertical ?? "hug";
+    }
     if (target.type === "text") {
       (["fill", "fillMode", "gradientType", "gradientColors", "strokeColor", "strokeWidth", "pad", "padV", "padH", "padTop", "padRight", "padBottom", "padLeft", "radius", "autoLayout"] as const)
         .forEach((key) => delete nextProps[key]);
     }
     target.props = { ...target.props, ...nextProps };
-    if (target.type === "text" && ["text", "size", "fontSize", "fontFamily", "weight", "letterSpacing", "lineHeight"].some((key) => key in nextProps)) {
+    if (target.type === "text" && ["text", "size", "fontSize", "fontFamily", "weight", "letterSpacing", "lineHeight", "paragraphSpacing", "textCase", "verticalTrim", "listStyle", "truncateText"].some((key) => key in nextProps)) {
       const measured = measureTextNode(target, target.props.text ?? "");
       target.w = measured.w;
       target.h = measured.h;
       const location = findNodeLocation(sc.nodes, target.id);
       if (location?.parent) resizeAutoLayoutContainer(location.parent);
     }
-    if (target.type === "frame" && target.props.autoLayout && target.children?.length && ["autoLayout", "direction", "align", "justify", "gap", "pad", "padV", "padH", "padTop", "padRight", "padBottom", "padLeft"].some((key) => key in nextProps)) {
+    if (target.type === "frame" && target.props.autoLayout && ["autoLayout", "direction", "align", "justify", "gap", "pad", "padV", "padH", "padTop", "padRight", "padBottom", "padLeft", "layoutSizingHorizontal", "layoutSizingVertical"].some((key) => key in nextProps)) {
       resizeAutoLayoutContainer(target);
     } else if (!target.props.autoLayout && ["align", "justify"].some((key) => key in nextProps)) {
       alignNodeOrChildren(sc.nodes, target);
     }
+    relayoutNodeAndAncestors(sc, target.id);
     set({ canvas: { ...st.canvas } });
     get().pushHistory("UPDATE_FRAME", [id]);
   },
@@ -1148,25 +1765,28 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const measured = measureTextNode(target, text);
     target.w = measured.w;
     target.h = measured.h;
-    const location = findNodeLocation(sc.nodes, target.id);
-    if (location?.parent) resizeAutoLayoutContainer(location.parent);
+    relayoutNodeAndAncestors(sc, target.id);
     set({ canvas: { ...st.canvas } });
   },
   setGeom: (id, geom) => {
     const st = get();
     const sc = getScreen(st.canvas.screen); if (!sc) return;
-    const n = findNodeById(sc, id); if (!n || n.locked) return;
-    if (geom.x !== undefined) n.x = geom.x;
-    if (geom.y !== undefined) n.y = geom.y;
+    const location = findNodeLocation(sc.nodes, id);
+    const n = location?.node; if (!n || n.locked) return;
+    const positionedByParent = !!location?.parent?.props.autoLayout;
+    if (!positionedByParent && geom.x !== undefined) n.x = geom.x;
+    if (!positionedByParent && geom.y !== undefined) n.y = geom.y;
     if (n.type !== "text" && geom.w !== undefined) {
       n.w = Math.max(MIN_W, geom.w);
+      if (n.props.layoutSizingHorizontal === "fill" || n.props.layoutSizingHorizontal === "hug") n.props.layoutSizingHorizontal = "fixed";
       if (n.type === "frame" && n.props.autoLayout) n.props.layoutSizingHorizontal = "fixed";
     }
     if (n.type !== "text" && geom.h !== undefined) {
       n.h = Math.max(MIN_H, geom.h);
+      if (n.props.layoutSizingVertical === "fill" || n.props.layoutSizingVertical === "hug") n.props.layoutSizingVertical = "fixed";
       if (n.type === "frame" && n.props.autoLayout) n.props.layoutSizingVertical = "fixed";
     }
-    if (n.type === "frame" && n.props.autoLayout && n.children?.length && (geom.w !== undefined || geom.h !== undefined)) resizeAutoLayoutContainer(n);
+    if (geom.w !== undefined || geom.h !== undefined) relayoutNodeAndAncestors(sc, n.id);
     if (geom.rotation !== undefined) n.rotation = ((geom.rotation % 360) + 360) % 360;
     set({ canvas: { ...st.canvas } });
   },
@@ -1177,9 +1797,9 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     set({ canvas: { ...st.canvas } });
     get().pushHistory("UPDATE_FRAME");
   },
-  setCanvasBg: (color: string) => set((st) => ({ canvas: { ...st.canvas, canvasBg: color } })),
-  setCanvasBgOpacity: (opacity: number) => set((st) => ({ canvas: { ...st.canvas, canvasBgOpacity: Math.max(0, Math.min(1, opacity)) } })),
-  toggleCanvasBg: () => set((st) => ({ canvas: { ...st.canvas, showCanvasBg: !st.canvas.showCanvasBg } })),
+  setCanvasBg: (color: string) => { set((st) => ({ canvas: { ...st.canvas, canvasBg: color } })); scheduleRemoteCanvasSave(); },
+  setCanvasBgOpacity: (opacity: number) => { set((st) => ({ canvas: { ...st.canvas, canvasBgOpacity: Math.max(0, Math.min(1, opacity)) } })); scheduleRemoteCanvasSave(); },
+  toggleCanvasBg: () => { set((st) => ({ canvas: { ...st.canvas, showCanvasBg: !st.canvas.showCanvasBg } })); scheduleRemoteCanvasSave(); },
   toggleNodeVisibility: (id: string) => {
     const st = get();
     const sc = getScreen(st.canvas.screen); if (!sc) return;
@@ -1236,15 +1856,21 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     set({ canvas: { ...st.canvas } });
     get().pushHistory("UPDATE_FRAME", [id, targetId]);
   },
-  pushHistory: (action = "UPDATE_FRAME", affectedIds = []) => set((st) => {
+  pushHistory: (action = "UPDATE_FRAME", affectedIds = []) => {
+    set((st) => {
     const history = st.canvas.history.slice(0, st.canvas.idx + 1);
-    const payload = JSON.stringify({ screens: SCREENS, guides: st.canvas.guides, zoom: st.canvas.zoom, pan: st.canvas.pan });
+    const screen = getScreen(st.canvas.screen);
+    if (!screen) return {};
+    const payload = snapshotString(screen, st.canvas.guides, st.canvas.zoom, st.canvas.pan);
+    const inverse = st.canvas.idx >= 0 ? st.canvas.history[st.canvas.idx].payload : payload;
     if (st.canvas.idx >= 0 && st.canvas.history[st.canvas.idx].payload === payload) return {};
-    history.push({ id: uuid("history"), timestamp: Date.now(), action, payload, inverse: st.canvas.idx < 0 ? INITIAL_CANVAS_SNAPSHOT : null, affectedIds });
-    trimHistory(history);
-    const idx = history.length - 1;
-    return { canvas: { ...st.canvas, history, idx } };
-  }),
+    history.push({ id: uuid("history"), timestamp: Date.now(), action, payload, inverse, affectedIds });
+    let idx = history.length - 1;
+    if (history.length > 100) { history.shift(); idx = 99; }
+      return { canvas: { ...st.canvas, history, idx } };
+    });
+    scheduleRemoteCanvasSave();
+  },
   commitHistory: (replaceCurrent = false, action = "MOVE_FRAMES", affectedIds = []) => {
     if (!replaceCurrent) {
       get().pushHistory(action, affectedIds);
@@ -1257,36 +1883,40 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
         ...history[st.canvas.idx],
         action,
         affectedIds: affectedIds.length ? affectedIds : history[st.canvas.idx].affectedIds,
-        payload: JSON.stringify({ screens: SCREENS, guides: st.canvas.guides, zoom: st.canvas.zoom, pan: st.canvas.pan }),
+        payload: getScreen(st.canvas.screen) ? snapshotString(getScreen(st.canvas.screen)!, st.canvas.guides, st.canvas.zoom, st.canvas.pan) : history[st.canvas.idx].payload,
       };
-      trimHistory(history);
-      return { canvas: { ...st.canvas, history, idx: Math.min(st.canvas.idx, history.length - 1) } };
+      return { canvas: { ...st.canvas, history } };
     });
+    scheduleRemoteCanvasSave();
   },
-  undo: () => set((st) => {
-    if (st.canvas.idx < 0) return {};
+  undo: () => {
+    const st = get();
+    if (st.canvas.idx <= 0) return;
     const entry = st.canvas.history[st.canvas.idx];
-    const inverse = entry.inverse ?? (st.canvas.idx > 0 ? st.canvas.history[st.canvas.idx - 1].payload : INITIAL_CANVAS_SNAPSHOT);
-    const snap = JSON.parse(inverse as string) as { screens: Screen[]; guides: Guide[]; zoom: number; pan: { x: number; y: number } };
-    snap.screens.forEach((s, i) => { SCREENS[i].nodes = s.nodes; SCREENS[i].w = s.w; SCREENS[i].h = s.h; });
-    return { canvas: { ...st.canvas, idx: st.canvas.idx - 1, selIds: [], guides: snap.guides, zoom: snap.zoom, pan: snap.pan } };
-  }),
-  redo: () => set((st) => {
-    if (st.canvas.idx >= st.canvas.history.length - 1) return {};
+    const screen = getScreen(st.canvas.screen); if (!screen) return;
+    const snap = applySnapshotValue(entry.inverse, screen); if (!snap) return;
+    set({ canvas: { ...st.canvas, idx: st.canvas.idx - 1, selIds: [], guides: snap.guides, zoom: snap.zoom, pan: snap.pan } });
+    scheduleRemoteCanvasSave();
+  },
+  redo: () => {
+    const st = get();
+    if (st.canvas.idx >= st.canvas.history.length - 1) return;
     const idx = st.canvas.idx + 1;
-    const snap = JSON.parse(st.canvas.history[idx].payload as string) as { screens: Screen[]; guides: Guide[]; zoom: number; pan: { x: number; y: number } };
-    snap.screens.forEach((s, i) => { SCREENS[i].nodes = s.nodes; SCREENS[i].w = s.w; SCREENS[i].h = s.h; });
-    return { canvas: { ...st.canvas, idx, selIds: [], guides: snap.guides, zoom: snap.zoom, pan: snap.pan } };
-  }),
+    const value = st.canvas.history[idx].payload;
+    const screen = getScreen(st.canvas.screen); if (!screen) return;
+    const snap = applySnapshotValue(value, screen); if (!snap) return;
+    set({ canvas: { ...st.canvas, idx, selIds: [], guides: snap.guides, zoom: snap.zoom, pan: snap.pan } });
+    scheduleRemoteCanvasSave();
+  },
   addGuide: (orientation, position) => {
     const id = uuid("guide");
     set((st) => ({ canvas: { ...st.canvas, guides: [...st.canvas.guides, { id, orientation, position }] } }));
     get().pushHistory("SET_GUIDE", [id]);
     return id;
   },
-  updateGuide: (id, position) => set((st) => ({
+  updateGuide: (id, position) => { set((st) => ({
     canvas: { ...st.canvas, guides: st.canvas.guides.map((guide) => guide.id === id ? { ...guide, position } : guide) },
-  })),
+  })); scheduleRemoteCanvasSave(); },
   deleteGuide: (id) => {
     set((st) => ({ canvas: { ...st.canvas, guides: st.canvas.guides.filter((guide) => guide.id !== id) } }));
     get().pushHistory("SET_GUIDE", [id]);

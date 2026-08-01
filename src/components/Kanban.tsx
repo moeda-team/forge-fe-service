@@ -1,7 +1,8 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useStore, KANBAN_COLS } from "@/lib/store";
-import type { KanbanCard } from "@/lib/types";
+import { forgeApi } from "@/lib/api";
+import type { KanbanCard, OrchestrationRun } from "@/lib/types";
 
 const CANVAS_STYLE: Record<string, { dot: string; chip: string; bar: string }> = {
   design: { dot: "bg-blue-500", chip: "bg-blue-50 text-blue-600", bar: "bg-blue-500" },
@@ -24,17 +25,73 @@ const COL_DOT: Record<string, string> = {
 export default function Kanban() {
   const p = useStore((s) => s.current());
   const sendToKanban = useStore((s) => s.sendToKanban);
+  const moveKanbanCard = useStore((s) => s.moveKanbanCard);
+  const refreshProject = useStore((s) => s.refreshProject);
   const [syncing, setSyncing] = useState(false);
+  const [syncSummary, setSyncSummary] = useState("");
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [movingId, setMovingId] = useState<string | null>(null);
+  const [run, setRun] = useState<OrchestrationRun | null>(null);
+  const [orchestrating, setOrchestrating] = useState(false);
+  const [orchestrationError, setOrchestrationError] = useState("");
+  const synced = Boolean(p && p.kanbanSyncedVer === (p.reqVersion || 1));
+
+  const executeOrchestration = async (trigger: OrchestrationRun["trigger"] = "automatic") => {
+    if (!p || orchestrating || !p.requirement || !synced) return;
+    setOrchestrating(true);
+    setOrchestrationError("");
+    try {
+      const nextRun = await forgeApi.runOrchestration(p.id, trigger);
+      setRun(nextRun);
+      await refreshProject(p.id);
+    } catch (cause) {
+      setOrchestrationError(cause instanceof Error ? cause.message : "AI orchestration failed");
+      const latest = await forgeApi.getLatestOrchestration(p.id).catch(() => null);
+      if (latest) setRun(latest);
+    } finally {
+      setOrchestrating(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!p?.requirement || !synced) { setRun(null); return; }
+    void forgeApi.getLatestOrchestration(p.id).then(async (latest) => {
+      if (cancelled) return;
+      setRun(latest);
+      const missingVerification = latest && !latest.steps.some((step) => step.key === "verification");
+      if (!latest || latest.requirementVersion < (p.reqVersion || 0) || missingVerification) await executeOrchestration("automatic");
+    }).catch((cause) => { if (!cancelled) setOrchestrationError(cause instanceof Error ? cause.message : "Unable to read orchestration status"); });
+    return () => { cancelled = true; };
+    // Run only when the Requirement/Kanban source version changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p?.id, p?.reqVersion, p?.kanbanSyncedVer, Boolean(p?.requirement)]);
   if (!p) return null;
   const kb = p.kanban || { backlog: [], todo: [], progress: [], done: [] };
   const total = kb.backlog.length + kb.todo.length + kb.progress.length + kb.done.length;
-  const synced = p.kanbanSyncedVer === (p.reqVersion || 1);
   const syncRequirement = async () => {
     if (syncing || !p.requirement) return;
     setSyncing(true);
-    await new Promise((resolve) => window.setTimeout(resolve, 700));
-    sendToKanban(p.id);
-    setSyncing(false);
+    try {
+      const result = await sendToKanban(p.id);
+      if (result) setSyncSummary(`${result.added} added · ${result.updated} updated · ${result.obsolete} obsolete`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const dropCard = async (status: KanbanCard["status"], index: number) => {
+    if (!draggedId || movingId) return;
+    const cardId = draggedId;
+    setDraggedId(null);
+    setMovingId(cardId);
+    try {
+      await moveKanbanCard(p.id, cardId, status, index);
+    } catch {
+      // The store restores the previous board and exposes the API error.
+    } finally {
+      setMovingId(null);
+    }
   };
 
   return (
@@ -72,12 +129,13 @@ export default function Kanban() {
           </button>
         )}
         <div className="ml-auto flex gap-2">
-          <span className="inline-flex items-center gap-2 rounded-lg bg-violet-50 px-3.5 py-1.5 text-[12px] font-semibold text-violet-700">
+          {syncSummary && <span className="self-center text-[11px] text-zinc-500">{syncSummary}</span>}
+          <span className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-1.5 text-[12px] font-semibold ${run?.status === "failed" ? "bg-red-50 text-red-700" : run?.status === "completed" ? "bg-emerald-50 text-emerald-700" : "bg-violet-50 text-violet-700"}`}>
             <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-60" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-violet-600" />
+              {(orchestrating || run?.status === "running") && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-60" />}
+              <span className={`relative inline-flex h-2 w-2 rounded-full ${run?.status === "failed" ? "bg-red-600" : run?.status === "completed" ? "bg-emerald-600" : "bg-violet-600"}`} />
             </span>
-            AI orchestrates automatically
+            {orchestrating ? "AI is orchestrating…" : run?.status === "completed" ? "AI orchestration complete" : run?.status === "failed" ? "Orchestration needs attention" : "AI orchestrates automatically"}
           </span>
         </div>
       </header>
@@ -99,6 +157,25 @@ export default function Kanban() {
             </p>
           </div>
         </div>
+        {(run || orchestrating || orchestrationError) && (
+          <div className="mt-3 rounded-2xl border border-zinc-200 bg-white px-5 py-4">
+            <div className="flex items-center gap-3">
+              <div><h3 className="text-sm font-semibold text-zinc-900">Orchestration activity</h3><p className="mt-0.5 text-[11px] text-zinc-400">{run ? `Requirement v${run.requirementVersion} · ${run.trigger}` : "Preparing the latest Requirement"}</p></div>
+              {run?.completedAt && <span className="ml-auto text-[11px] text-zinc-400">Completed {new Date(run.completedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>}
+              {run?.status === "failed" && <button type="button" onClick={() => void executeOrchestration("retry")} disabled={orchestrating} className="ml-auto rounded-lg bg-zinc-900 px-3 py-1.5 text-[11px] font-semibold text-white disabled:opacity-50">Retry</button>}
+            </div>
+            {orchestrationError && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{orchestrationError}</p>}
+            <div className="mt-4 grid grid-cols-2 gap-2 lg:grid-cols-7">
+              {(run?.steps || []).map((step) => (
+                <div key={step.key} className="rounded-xl border border-zinc-200 px-3 py-2.5">
+                  <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${step.status === "completed" ? "bg-emerald-500" : step.status === "failed" ? "bg-red-500" : step.status === "running" ? "animate-pulse bg-violet-500" : "bg-zinc-300"}`} /><span className="truncate text-[11px] font-medium text-zinc-700">{step.label}</span></div>
+                  {(step.fileCount !== undefined || step.taskCount !== undefined || step.checkCount !== undefined) && <div className="mt-1.5 text-[10px] text-zinc-400">{step.fileCount !== undefined ? `${step.fileCount} files` : step.checkCount !== undefined ? `${step.checkCount} checks` : `${step.taskCount} tasks updated`}</div>}
+                </div>
+              ))}
+              {orchestrating && !run && [0, 1, 2, 3, 4, 5].map((item) => <div key={item} className="h-14 animate-pulse rounded-xl bg-zinc-100" />)}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden px-6 pb-6 pt-4">
@@ -112,11 +189,23 @@ export default function Kanban() {
                   <span className="text-sm font-semibold text-zinc-700">{col.label}</span>
                   <span className="ml-auto text-[11px] font-medium text-zinc-400 bg-white border border-zinc-200 rounded-full px-2 py-0.5">{cards.length}</span>
                 </div>
-                <div className="flex-1 min-h-0 overscroll-contain overflow-y-auto p-3 flex flex-col gap-2.5">
+                <div
+                  className={`flex-1 min-h-0 overscroll-contain overflow-y-auto p-3 flex flex-col gap-2.5 ${draggedId ? "bg-zinc-200/40" : ""}`}
+                  onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; }}
+                  onDrop={(event) => { event.preventDefault(); void dropCard(col.key as KanbanCard["status"], cards.length); }}
+                >
                   {cards.length === 0 ? (
                     <div className="text-center text-[12px] text-zinc-400 py-8 border border-dashed border-zinc-200 rounded-xl">Drop tasks here</div>
                   ) : (
-                    cards.map((c) => <Card key={c.id} c={c} />)
+                    cards.map((c, index) => (
+                      <div
+                        key={c.id}
+                        onDragOver={(event) => { if (!c.obsolete) { event.preventDefault(); event.stopPropagation(); } }}
+                        onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void dropCard(col.key as KanbanCard["status"], index); }}
+                      >
+                        <Card c={c} moving={movingId === c.id} onDragStart={() => setDraggedId(c.id)} onDragEnd={() => setDraggedId(null)} />
+                      </div>
+                    ))
                   )}
                 </div>
               </div>
@@ -128,15 +217,21 @@ export default function Kanban() {
   );
 }
 
-function Card({ c }: { c: KanbanCard }) {
+function Card({ c, moving, onDragStart, onDragEnd }: { c: KanbanCard; moving: boolean; onDragStart: () => void; onDragEnd: () => void }) {
   const st = styleFor(c.canvas ?? undefined);
   return (
-    <div className="group relative bg-white border border-zinc-200 rounded-xl p-3 pl-4 text-[13px] leading-relaxed hover:border-zinc-900 hover:shadow-sm transition cursor-grab active:cursor-grabbing">
+    <div
+      draggable={!c.obsolete && !moving}
+      onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", c.id); onDragStart(); }}
+      onDragEnd={onDragEnd}
+      className={`group relative bg-white border border-zinc-200 rounded-xl p-3 pl-4 text-[13px] leading-relaxed transition ${c.obsolete ? "opacity-50 cursor-not-allowed" : "hover:border-zinc-900 hover:shadow-sm cursor-grab active:cursor-grabbing"} ${moving ? "animate-pulse" : ""}`}
+    >
       <span className={`absolute left-0 top-2 bottom-2 w-1 rounded-full ${st.bar}`} />
       <div className="text-zinc-800">{c.title}</div>
       <div className="mt-2.5 flex items-center gap-1.5 flex-wrap">
         {c.canvas && <span className={`text-[10px] font-semibold uppercase tracking-wide rounded px-1.5 py-0.5 ${st.chip}`}>{c.canvas}</span>}
         {c.reqRef && <span className="text-[10px] font-mono text-zinc-400">{c.reqRef}</span>}
+        {c.obsolete && <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-zinc-600">Obsolete</span>}
       </div>
     </div>
   );

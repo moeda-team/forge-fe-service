@@ -1,11 +1,12 @@
 "use client";
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useCanvas, getScreen, findNodeById, SCREENS, useStore } from "@/lib/store";
+import { useCanvas, getScreen, findNodeById, findParentNode, getAutoLayoutDropPreview, SCREENS, useStore, loadRemoteCanvas } from "@/lib/store";
 import type { CNode } from "@/lib/types";
 import LayersPanel from "./LayersPanel";
 import InspectorPanel from "./InspectorPanel";
 import SelectedNodeInspector from "./SelectedNodeInspector";
 import EditableText from "./EditableText";
+import { formatCanvasText } from "@/lib/canvasLayout";
 
 type ToolKey = "move" | "hand" | "text" | "rect" | "ellipse" | "frame";
 type FramePresetKey = "desktop" | "tablet" | "mobile";
@@ -129,6 +130,8 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const addNode = useCanvas((s) => s.addNode);
   const addShape = useCanvas((s) => s.addShape);
   const autoParentNode = useCanvas((s) => s.autoParentNode);
+  const dropNodeInAutoLayout = useCanvas((s) => s.dropNodeInAutoLayout);
+  const previewAutoLayoutReorder = useCanvas((s) => s.previewAutoLayoutReorder);
   const deleteNode = useCanvas((s) => s.deleteNode);
   const updateNode = useCanvas((s) => s.updateNode);
   const updateTextContent = useCanvas((s) => s.updateTextContent);
@@ -141,6 +144,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const copySelected = useCanvas((s) => s.copySelected);
   const cutSelected = useCanvas((s) => s.cutSelected);
   const pasteClipboard = useCanvas((s) => s.pasteClipboard);
+  const replaceSelectedWithClipboard = useCanvas((s) => s.replaceSelectedWithClipboard);
   const importFigmaClipboard = useCanvas((s) => s.importFigmaClipboard);
   const duplicateSelected = useCanvas((s) => s.duplicateSelected);
   const commitHistory = useCanvas((s) => s.commitHistory);
@@ -152,8 +156,34 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const redo = useCanvas((s) => s.redo);
   const activeTool = useCanvas((s) => s.activeTool);
   const setActiveTool = useCanvas((s) => s.setActiveTool);
+  const saveStatus = useCanvas((s) => s.saveStatus);
+  const createCanvasScreen = useCanvas((s) => s.createScreen);
+  const renameCanvasScreen = useCanvas((s) => s.renameScreen);
+  const duplicateCanvasScreen = useCanvas((s) => s.duplicateScreen);
+  const deleteCanvasScreen = useCanvas((s) => s.deleteScreen);
   const currentProjectId = useStore((s) => s.currentId);
+  const apiEnabled = useStore((s) => s.apiEnabled);
   const activeToolLabel = TOOLBAR_ITEMS.find((tool) => tool.key === activeTool)?.label ?? "Move";
+
+  const createNewScreen = () => {
+    const name = window.prompt("Screen name", `Screen ${availableScreens.length + 1}`);
+    if (name?.trim()) void createCanvasScreen(name);
+  };
+
+  const renameCurrentScreen = () => {
+    const name = window.prompt("Rename screen", canvas.screen);
+    if (name?.trim()) void renameCanvasScreen(name);
+  };
+
+  const duplicateCurrentScreen = () => {
+    const name = window.prompt("Duplicate screen as", `${canvas.screen} copy`);
+    if (name?.trim()) void duplicateCanvasScreen(name);
+  };
+
+  const removeCurrentScreen = () => {
+    if (availableScreens.length <= 1) return;
+    if (window.confirm(`Delete “${canvas.screen}”?`)) void deleteCanvasScreen();
+  };
 
   const screen = getScreen(canvas.screen)!;
   const availableScreens = SCREENS.filter((item) => !item.projectId || item.projectId === currentProjectId);
@@ -164,12 +194,15 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const [dragOver, setDragOver] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [selectionBox, setSelectionBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const [insertionIndicator, setInsertionIndicator] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [dragVisual, setDragVisual] = useState<{ id: string; dx: number; dy: number } | null>(null);
+  const [remoteCanvasLoading, setRemoteCanvasLoading] = useState(apiEnabled);
+  const [remoteCanvasProgress, setRemoteCanvasProgress] = useState(0);
   const [framePreset, setFramePreset] = useState<FramePresetKey | null>(null);
   const [framePresetOpen, setFramePresetOpen] = useState(false);
-  const [viewportSize, setViewportSize] = useState({ width: screen.w, height: screen.h });
   const rootRef = useRef<HTMLDivElement>(null);
   const vpRef = useRef<HTMLDivElement>(null);
-  const dragNode = useRef<{ id: string; ox: number; oy: number; sx: number; sy: number; moved: boolean; textClick?: boolean } | null>(null);
+  const dragNode = useRef<{ id: string; ox: number; oy: number; absX: number; absY: number; sx: number; sy: number; moved: boolean; textClick?: boolean; autoLayoutChild?: boolean; lastWorld?: { x: number; y: number }; lastPosition?: { x: number; y: number } } | null>(null);
   const resizing = useRef<{ id: string; handle: string; ox: number; oy: number; ow: number; oh: number; sx: number; sy: number } | null>(null);
   const panning = useRef<{ sx: number; sy: number; px: number; py: number } | null>(null);
   const creating = useRef<{ id: string; x: number; y: number; tool: "frame" | "rect" | "ellipse" } | null>(null);
@@ -179,6 +212,21 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const preferInternalPaste = useRef(false);
   const previousTool = useRef<ToolKey>("move");
   const initialProjectScreenResolved = useRef(false);
+
+  useEffect(() => {
+    if (!apiEnabled || !currentProjectId) { setRemoteCanvasLoading(false); return; }
+    let cancelled = false;
+    setRemoteCanvasLoading(true);
+    setRemoteCanvasProgress(0);
+    void loadRemoteCanvas(currentProjectId, (progress) => {
+      if (!cancelled) setRemoteCanvasProgress(progress);
+    })
+      .catch((error) => {
+        useStore.setState({ apiError: error instanceof Error ? error.message : "Unable to load the design canvas" });
+      })
+      .finally(() => { if (!cancelled) setRemoteCanvasLoading(false); });
+    return () => { cancelled = true; };
+  }, [apiEnabled, currentProjectId]);
 
   const selectTool = useCallback((tool: ToolKey) => {
     setActiveTool(tool);
@@ -212,6 +260,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   }, [availableScreens, canvas.screen, setCanvasScreen]);
 
   useEffect(() => {
+    if (remoteCanvasLoading) return;
     const vp = vpRef.current; if (!vp) return;
     vp.focus();
     const rect = vp.getBoundingClientRect();
@@ -220,20 +269,10 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     const zh = (rect.height - pad) / screen.h;
     const z = Math.min(zw, zh, 1.2);
     setZoomPan(z, { x: (rect.width - screen.w * z) / 2, y: (rect.height - screen.h * z) / 2 });
-  }, [screen.w, screen.h, setZoomPan]);
+  }, [remoteCanvasLoading, screen.w, screen.h, setZoomPan]);
 
   useEffect(() => {
-    const vp = vpRef.current;
-    if (!vp) return;
-    const observer = new ResizeObserver(([entry]) => {
-      const { width, height } = entry.contentRect;
-      setViewportSize((current) => current.width === width && current.height === height ? current : { width, height });
-    });
-    observer.observe(vp);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
+    if (remoteCanvasLoading) return;
     const vp = vpRef.current;
     if (!vp) return;
     const onCanvasWheel = (e: WheelEvent) => {
@@ -257,7 +296,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
         x: (cursor.x - current.pan.x) / current.zoom,
         y: (cursor.y - current.pan.y) / current.zoom,
       };
-      const nextZoom = Math.max(0.25, Math.min(32, current.zoom * Math.exp(-e.deltaY * TRACKPAD_ZOOM_SENSITIVITY)));
+      const nextZoom = Math.max(0.05, Math.min(32, current.zoom * Math.exp(-e.deltaY * TRACKPAD_ZOOM_SENSITIVITY)));
       useCanvas.getState().setZoomPan(nextZoom, {
         x: cursor.x - world.x * nextZoom,
         y: cursor.y - world.y * nextZoom,
@@ -265,12 +304,12 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     };
     vp.addEventListener("wheel", onCanvasWheel, { passive: false });
     return () => vp.removeEventListener("wheel", onCanvasWheel);
-  }, []);
+  }, [remoteCanvasLoading]);
 
   const zoomFromCenter = useCallback((nextZoom: number) => {
     const vp = vpRef.current?.getBoundingClientRect(); if (!vp) return;
     const current = useCanvas.getState().canvas;
-    const clamped = Math.max(0.25, Math.min(32, nextZoom));
+    const clamped = Math.max(0.05, Math.min(32, nextZoom));
     const center = { x: vp.width / 2, y: vp.height / 2 };
     const world = {
       x: (center.x - current.pan.x) / current.zoom,
@@ -311,17 +350,21 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   };
 
   const onNodeDown = (e: React.MouseEvent, n: CNode) => {
+    const autoLayoutChild = !!findParentNode(screen, n.id)?.props.autoLayout;
+    const absolute = collectSelectionLocations(screen.nodes, new Set([n.id]))[0] ?? { x: n.x, y: n.y };
+    const additiveSelection = e.shiftKey || e.ctrlKey || e.metaKey;
+    if (activeTool === "move") e.preventDefault();
     if (n.type === "text") {
       e.stopPropagation();
       e.preventDefault();
       if (n.visible === false || n.locked) return;
-      if (activeTool === "move" && editingId !== n.id && canvas.selIds.includes(n.id)) {
+      if (activeTool === "move" && editingId !== n.id && canvas.selIds.includes(n.id) && !additiveSelection) {
         vpRef.current?.focus();
         const vp = vpRef.current!.getBoundingClientRect();
-        dragNode.current = { id: n.id, ox: n.x, oy: n.y, sx: e.clientX - vp.left, sy: e.clientY - vp.top, moved: false, textClick: true };
+        dragNode.current = { id: n.id, ox: n.x, oy: n.y, absX: absolute.x, absY: absolute.y, sx: e.clientX - vp.left, sy: e.clientY - vp.top, moved: false, textClick: true, autoLayoutChild };
         return;
       }
-      setSel(n.id, e.ctrlKey || e.metaKey, e.shiftKey);
+      setSel(n.id, additiveSelection);
       if (editingId !== n.id) pendingTextEdit.current = n.id;
       return;
     }
@@ -333,9 +376,10 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     if (n.visible === false || n.locked || editingId) return;
     e.stopPropagation();
     vpRef.current?.focus();
-    setSel(n.id, e.ctrlKey || e.metaKey, e.shiftKey);
+    setSel(n.id, additiveSelection);
+    if (additiveSelection) return;
     const vp = vpRef.current!.getBoundingClientRect();
-    dragNode.current = { id: n.id, ox: n.x, oy: n.y, sx: e.clientX - vp.left, sy: e.clientY - vp.top, moved: false };
+    dragNode.current = { id: n.id, ox: n.x, oy: n.y, absX: absolute.x, absY: absolute.y, sx: e.clientX - vp.left, sy: e.clientY - vp.top, moved: false, autoLayoutChild };
   };
   const onNodeDblClick = (n: CNode) => {
     const isText = n.type === "text" || n.type === "button" || n.type === "card" || n.type === "row" || n.type === "section" || n.type === "input";
@@ -359,6 +403,23 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
       const screenDy = e.clientY - vp.top - dragNode.current.sy;
       if (!dragNode.current.moved && Math.hypot(screenDx, screenDy) < 3) return;
       dragNode.current.moved = true;
+      const world = { x: (e.clientX - vp.left - pan.x) / zoom, y: (e.clientY - vp.top - pan.y) / zoom };
+      const position = { x: dragNode.current.absX + screenDx / zoom, y: dragNode.current.absY + screenDy / zoom };
+      dragNode.current.lastWorld = world;
+      dragNode.current.lastPosition = position;
+      let preview = getAutoLayoutDropPreview(screen, dragNode.current.id, world);
+      if (dragNode.current.autoLayoutChild && preview) {
+        previewAutoLayoutReorder(dragNode.current.id, world);
+        preview = getAutoLayoutDropPreview(screen, dragNode.current.id, world);
+      }
+      if (dragNode.current.autoLayoutChild) {
+        const currentAbsolute = collectSelectionLocations(screen.nodes, new Set([dragNode.current.id]))[0];
+        if (currentAbsolute) setDragVisual({ id: dragNode.current.id, dx: position.x - currentAbsolute.x, dy: position.y - currentAbsolute.y });
+      } else {
+        setDragVisual({ id: dragNode.current.id, dx: 0, dy: 0 });
+      }
+      setInsertionIndicator(preview ? { x: preview.x, y: preview.y, w: preview.w, h: preview.h } : null);
+      if (dragNode.current.autoLayoutChild) return;
       const nx = dragNode.current.ox + screenDx / zoom;
       const ny = dragNode.current.oy + screenDy / zoom;
       setGeom(dragNode.current.id, { x: nx, y: ny });
@@ -391,6 +452,13 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const onVpDown = (e: React.MouseEvent) => {
     if (e.target !== vpRef.current && !(e.target as HTMLElement).dataset.vp) return;
     vpRef.current?.focus();
+    if (editingId) {
+      e.preventDefault();
+      setEditingId(null);
+      setActiveTool("move");
+      commitHistory(false, "UPDATE_FRAME", [editingId]);
+      return;
+    }
     if (activeTool === "frame" || activeTool === "rect" || activeTool === "ellipse") {
       startCreating(e);
       return;
@@ -439,11 +507,31 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   }, [addNode, setActiveTool, updateNode]);
 
   const readImageFile = useCallback((file: File, point: { x: number; y: number }, index = 0) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === "string") insertImageSource(reader.result, file.name || "Image", point, index);
+    const insertBlob = (blob: Blob) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (typeof reader.result === "string") insertImageSource(reader.result, file.name || "Image", point, index);
+      };
+      reader.readAsDataURL(blob);
     };
-    reader.readAsDataURL(file);
+    if (file.size > 12 * 1024 * 1024) {
+      useStore.setState({ apiError: "Image is too large. Use a file smaller than 12 MB." });
+      return;
+    }
+    if (file.size <= 750 * 1024 || /svg|gif/i.test(file.type)) {
+      insertBlob(file);
+      return;
+    }
+    void createImageBitmap(file).then((bitmap) => {
+      const maxDimension = 2000;
+      const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      bitmap.close();
+      canvas.toBlob((blob) => insertBlob(blob || file), "image/webp", 0.82);
+    }).catch(() => insertBlob(file));
   }, [insertImageSource]);
 
   const onCanvasDrop = (e: React.DragEvent<HTMLDivElement>) => {
@@ -570,8 +658,12 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
         if (dragNode.current?.textClick && !dragNode.current.moved && active) {
           pendingTextEdit.current = active;
         } else {
-          if (active) autoParentNode(active);
-          commitHistory(false, dragNode.current ? "MOVE_FRAMES" : "UPDATE_FRAME", active ? [active] : []);
+          const hierarchyHandled = !!(dragNode.current?.moved && dragNode.current.lastWorld
+            && dropNodeInAutoLayout(dragNode.current.id, dragNode.current.lastWorld, dragNode.current.lastPosition));
+          if (!hierarchyHandled) {
+            if (active) autoParentNode(active);
+            commitHistory(false, dragNode.current ? "MOVE_FRAMES" : "UPDATE_FRAME", active ? [active] : []);
+          }
         }
       } else if (draggingGuide.current) {
         commitHistory(!!draggingGuide.current.isNew, "SET_GUIDE", [draggingGuide.current.id]);
@@ -610,13 +702,15 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
       creating.current = null;
       marquee.current = null;
       setSelectionBox(null);
+      setInsertionIndicator(null);
+      setDragVisual(null);
       const textId = pendingTextEdit.current;
       pendingTextEdit.current = null;
       if (textId) setEditingId(textId);
     };
     window.addEventListener("mouseup", up);
     return () => window.removeEventListener("mouseup", up);
-  }, [autoParentNode, clearSel, commitHistory, framePreset, screen, setActiveTool, setGeom, setSel]);
+  }, [autoParentNode, clearSel, commitHistory, dropNodeInAutoLayout, framePreset, screen, setActiveTool, setGeom, setSel]);
 
   useEffect(() => {
     if (!editingId) return;
@@ -671,9 +765,24 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
       if (mod && e.key === "0") { e.preventDefault(); zoomFromCenter(1); return; }
       if (key === "z" && mod && !e.shiftKey) { e.preventDefault(); undo(); return; }
       if ((key === "z" && mod && e.shiftKey) || (key === "y" && mod)) { e.preventDefault(); redo(); return; }
+      if (mod && e.shiftKey && key === "r") { e.preventDefault(); replaceSelectedWithClipboard(); return; }
       if (mod && key === "a") {
         e.preventDefault();
         selectAllEligible();
+        return;
+      }
+      if (!mod && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key) && canvas.selIds.length) {
+        e.preventDefault();
+        const distance = e.shiftKey ? 10 : 1;
+        for (const id of canvas.selIds) {
+          const selected = findNodeById(screen, id);
+          if (!selected || findParentNode(screen, id)?.props.autoLayout) continue;
+          setGeom(id, {
+            x: selected.x + (e.key === "ArrowLeft" ? -distance : e.key === "ArrowRight" ? distance : 0),
+            y: selected.y + (e.key === "ArrowUp" ? -distance : e.key === "ArrowDown" ? distance : 0),
+          });
+        }
+        commitHistory(false, "MOVE_FRAMES", canvas.selIds);
         return;
       }
       if (!mod && e.shiftKey && key === "a") {
@@ -701,7 +810,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [canvas.selIds, editingId, screen, undo, redo, copySelected, cutSelected, pasteClipboard, duplicateSelected, autoLayoutSelected, selectAllEligible, deleteNode, selectTool, setActiveTool, toggleRulers, updateNode, updateTextContent, zoomFromCenter]);
+  }, [canvas.selIds, editingId, screen, undo, redo, copySelected, cutSelected, pasteClipboard, replaceSelectedWithClipboard, duplicateSelected, autoLayoutSelected, selectAllEligible, deleteNode, selectTool, setActiveTool, setGeom, commitHistory, toggleRulers, updateNode, updateTextContent, zoomFromCenter]);
 
   useEffect(() => {
     const onSpace = (e: KeyboardEvent) => {
@@ -746,11 +855,12 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     setAiCard(null);
   };
 
+  const viewportRect = vpRef.current?.getBoundingClientRect();
   const viewportWorld = {
     x: -pan.x / zoom,
     y: -pan.y / zoom,
-    w: viewportSize.width / zoom,
-    h: viewportSize.height / zoom,
+    w: (viewportRect?.width ?? screen.w) / zoom,
+    h: (viewportRect?.height ?? screen.h) / zoom,
   };
   const visibleRoots = screen.nodes.filter((node) => node.visible !== false);
   const miniMinX = Math.min(viewportWorld.x, ...visibleRoots.map((node) => node.x), 0);
@@ -769,7 +879,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     const minY = Math.min(...roots.map((node) => node.y));
     const maxX = Math.max(...roots.map((node) => node.x + node.w));
     const maxY = Math.max(...roots.map((node) => node.y + node.h));
-    const next = Math.max(0.25, Math.min(32, Math.min((vp.width - 80) / Math.max(1, maxX - minX), (vp.height - 80) / Math.max(1, maxY - minY))));
+    const next = Math.max(0.05, Math.min(32, Math.min((vp.width - 80) / Math.max(1, maxX - minX), (vp.height - 80) / Math.max(1, maxY - minY))));
     setZoomPan(next, { x: (vp.width - (maxX - minX) * next) / 2 - minX * next, y: (vp.height - (maxY - minY) * next) / 2 - minY * next });
   };
   const moreToolItems = [
@@ -778,6 +888,10 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     { key: "ellipse2", label: "Ellipse", icon: <span>○</span>, shortcut: "O", action: () => setActiveTool("ellipse") },
     { key: "text2", label: "Text", icon: <span>T</span>, shortcut: "T", action: () => setActiveTool("text") },
     { key: "comment2", label: "Comment", icon: <span>💬</span>, action: () => {} },
+    { key: "copy", label: "Copy", icon: <span>⧉</span>, shortcut: "⌘C", action: copySelected },
+    { key: "cut", label: "Cut", icon: <span>✂</span>, shortcut: "⌘X", action: cutSelected },
+    { key: "paste", label: "Paste", icon: <span>▣</span>, shortcut: "⌘V", action: pasteClipboard },
+    { key: "replace", label: "Paste to replace", icon: <span>↻</span>, shortcut: "⌘⇧R", action: replaceSelectedWithClipboard },
     { key: "duplicate", label: "Duplicate", icon: <span>⧉</span>, shortcut: "⌘D", action: duplicateSelected },
     { key: "lock", label: "Lock / unlock", icon: <span>🔒</span>, action: () => canvas.selIds.forEach((id) => toggleNodeLock(id)) },
     { key: "delete", label: "Delete", icon: <span>🗑</span>, shortcut: "⌫", action: () => canvas.selIds.forEach((id) => deleteNode(id)) },
@@ -788,6 +902,8 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     { key: "redo2", label: "Redo", icon: <span>↷</span>, shortcut: "⌘⇧Z", action: redo },
   ];
 
+  if (remoteCanvasLoading) return <CanvasLoadingWorkspace progress={remoteCanvasProgress} />;
+
   return (
     <div ref={rootRef} className="flex-1 flex flex-col min-h-0 bg-zinc-100">
       {/* top bar */}
@@ -797,10 +913,10 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
             <div className="w-6 h-6 rounded-md bg-zinc-900 text-white grid place-items-center text-xs font-bold">F</div>
             <span className="text-[13px] font-semibold">Forge</span>
           </div>
-          <button onClick={() => {}} className="text-[12px] text-zinc-500 hover:text-zinc-700">+</button>
+          <button onClick={createNewScreen} title="New screen" className="w-6 h-6 rounded-md text-[16px] text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100">+</button>
         </div>
 
-        <div className="flex-1 flex justify-center">
+        <div className="flex-1 flex items-center justify-center gap-1">
           <label className="relative">
             <span className="sr-only">Design screen</span>
             <select
@@ -812,6 +928,12 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
             </select>
             <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[9px] text-zinc-400">⌄</span>
           </label>
+          <button onClick={renameCurrentScreen} title="Rename screen" className="w-7 h-7 rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900">✎</button>
+          <button onClick={duplicateCurrentScreen} title="Duplicate screen" className="w-7 h-7 rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900">⧉</button>
+          <button onClick={removeCurrentScreen} disabled={availableScreens.length <= 1} title="Delete screen" className="w-7 h-7 rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-red-600 disabled:opacity-30 disabled:hover:bg-transparent">×</button>
+          <span className={`ml-2 min-w-14 text-[10px] ${saveStatus === "error" ? "text-red-600" : "text-zinc-400"}`}>
+            {saveStatus === "saving" ? "Saving…" : saveStatus === "error" ? "Save failed" : saveStatus === "saved" ? "Saved" : ""}
+          </span>
         </div>
 
         <span className="w-px h-6 bg-zinc-200 mx-1 shrink-0" />
@@ -839,7 +961,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
             <div className="flex-1 relative overflow-hidden bg-white">
               {canvas.showCanvasBg && <div className="absolute inset-0 pointer-events-none" style={{ backgroundColor: canvas.canvasBg, opacity: canvas.canvasBgOpacity }} />}
               <div className="absolute inset-0 pointer-events-none" style={{ backgroundImage: "radial-gradient(#a1a1aa 1px, transparent 1px)", backgroundSize: "16px 16px" }} />
-              <div ref={vpRef} data-vp="1" tabIndex={0} onMouseDown={onVpDown} onMouseMove={onVpMove} onContextMenu={(e) => onContext(e, null)} onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDragOver(true); }} onDragLeave={(e) => { if (e.target === e.currentTarget) setDragOver(false); }} onDrop={onCanvasDrop} className={`absolute inset-0 outline-none ${dragOver ? "ring-2 ring-violet-500 bg-violet-50/40" : ""}`} style={{ cursor: activeTool === "hand" ? "grab" : "default" }}>
+              <div ref={vpRef} data-vp="1" tabIndex={0} onMouseDown={onVpDown} onMouseMove={onVpMove} onContextMenu={(e) => onContext(e, null)} onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDragOver(true); }} onDragLeave={(e) => { if (e.target === e.currentTarget) setDragOver(false); }} onDrop={onCanvasDrop} className={`absolute inset-0 outline-none ${dragOver ? "ring-2 ring-violet-500 bg-violet-50/40" : ""}`} style={{ cursor: activeTool === "hand" ? (panning.current ? "grabbing" : "grab") : "default" }}>
                 {canvas.showRulers && <>
                   <div onMouseDown={(e) => { e.stopPropagation(); const id = addGuide("horizontal", (e.clientY - vpRef.current!.getBoundingClientRect().top - pan.y) / zoom); draggingGuide.current = { id, orientation: "horizontal", isNew: true }; }} className="absolute z-30 top-0 left-5 right-0 h-5 bg-white/90 backdrop-blur border-b border-zinc-200 overflow-hidden cursor-row-resize" style={{ backgroundPosition: `${pan.x}px 0`, backgroundSize: `${50 * zoom}px 5px`, backgroundImage: `linear-gradient(to right, #d4d4d8 1px, transparent 1px)` }} />
                   <div onMouseDown={(e) => { e.stopPropagation(); const id = addGuide("vertical", (e.clientX - vpRef.current!.getBoundingClientRect().left - pan.x) / zoom); draggingGuide.current = { id, orientation: "vertical", isNew: true }; }} className="absolute z-30 top-5 left-0 bottom-0 w-5 bg-white/90 backdrop-blur border-r border-zinc-200 overflow-hidden cursor-col-resize" style={{ backgroundPosition: `0 ${pan.y}px`, backgroundSize: `5px ${50 * zoom}px`, backgroundImage: `linear-gradient(to bottom, #d4d4d8 1px, transparent 1px)` }} />
@@ -851,6 +973,9 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
                     className="absolute z-30 pointer-events-none border border-violet-600 bg-violet-500/10"
                     style={selectionBox}
                   />
+                )}
+                {insertionIndicator && (
+                  <div className="absolute z-40 pointer-events-none rounded-full bg-[#0d99ff] shadow-[0_0_0_1px_white]" style={{ left: pan.x + insertionIndicator.x * zoom, top: pan.y + insertionIndicator.y * zoom, width: Math.max(2, insertionIndicator.w * zoom), height: Math.max(2, insertionIndicator.h * zoom) }} />
                 )}
                 {canvas.guides.map((guide) => (
                   <div
@@ -865,7 +990,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
                 <div className="absolute top-0 left-0 origin-top-left" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
                   <div className="absolute overflow-visible" style={{ left: 0, top: 0 }}>
                     {screen.nodes.map((n) => (
-                      <NodeView key={n.id} n={n} scale={1} onDown={onNodeDown} onDblClick={onNodeDblClick} onContext={(e, node) => onContext(e, node.id)} editingId={editingId} onTextChange={updateTextContent} onFinishEdit={finishEditing} onCancelEdit={cancelEditing} />
+                      <NodeView key={n.id} n={n} scale={1} onDown={onNodeDown} onDblClick={onNodeDblClick} onContext={(e, node) => onContext(e, node.id)} editingId={editingId} dragVisual={dragVisual} onTextChange={updateTextContent} onFinishEdit={finishEditing} onCancelEdit={cancelEditing} />
                     ))}
                   </div>
                   <div className="absolute left-0 top-0 z-[1000] overflow-visible pointer-events-none" data-selection-overlay="true">
@@ -1004,7 +1129,59 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   );
 }
 
-function NodeView({ n, scale, onDown, onDblClick, onContext, onTextChange, onFinishEdit, onCancelEdit, editingId }: { n: CNode; scale: number; onDown?: (e: React.MouseEvent, n: CNode) => void; onDblClick?: (n: CNode) => void; onContext?: (e: React.MouseEvent, n: CNode) => void; onTextChange?: (id: string, text: string) => void; onFinishEdit?: (id: string, text: string) => void; onCancelEdit?: () => void; editingId?: string | null }) {
+function CanvasLoadingWorkspace({ progress }: { progress: number }) {
+  const layerRows = [72, 54, 68, 60, 76, 52, 66, 58];
+  const loadingMessage = progress < 18
+    ? "Loading screens"
+    : progress < 85
+      ? "Loading layers and history"
+      : progress < 96
+        ? "Preparing layout and properties"
+        : "Finalizing workspace";
+  return (
+    <div className="flex-1 flex min-h-0 flex-col overflow-hidden bg-white text-zinc-900" role="status" aria-live="polite" aria-label="Preparing canvas">
+      <div className="flex h-11 shrink-0 items-center border-b border-zinc-200 px-4">
+        <div className="grid h-7 w-7 place-items-center rounded-lg bg-black text-xs font-bold text-white">F</div>
+        <span className="ml-2 text-[13px] font-semibold">Forge</span>
+        <span className="ml-4 text-zinc-400">＋</span>
+        <div className="mx-auto h-3 w-24 rounded-full bg-zinc-200 animate-pulse" />
+        <div className="flex items-center gap-4 text-zinc-300"><span>↶</span><span>↷</span><span className="h-7 w-16 rounded-lg bg-zinc-200" /></div>
+      </div>
+      <div className="flex min-h-0 flex-1">
+        <aside className="w-64 shrink-0 border-r border-zinc-200 p-5">
+          <div className="mb-7 flex items-center justify-between"><span className="text-[12px] font-semibold">Layers</span><span className="h-7 w-7 rounded-lg border border-zinc-200" /></div>
+          <div className="mb-6 h-9 rounded-xl border border-zinc-200 bg-zinc-50" />
+          <div className="space-y-4 animate-pulse">
+            {layerRows.map((width, index) => <div key={index} className="flex items-center gap-3" style={{ paddingLeft: index % 3 === 1 ? 18 : 0 }}><span className="h-4 w-4 rounded bg-zinc-200" /><span className="h-2.5 rounded-full bg-zinc-200" style={{ width }} /></div>)}
+          </div>
+        </aside>
+        <main className="relative flex-1 overflow-hidden bg-zinc-50" style={{ backgroundImage: "radial-gradient(#d4d4d8 1px, transparent 1px)", backgroundSize: "24px 24px" }}>
+          <div className="absolute left-1/2 top-1/2 w-[min(420px,70%)] -translate-x-1/2 -translate-y-1/2">
+            <div className="flex items-center justify-between text-[14px] font-semibold text-black"><span>Preparing canvas</span><span>{progress}%</span></div>
+            <div className="mt-4 h-2 overflow-hidden rounded-full bg-zinc-200" role="progressbar" aria-label="Canvas loading progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+              <div className="h-full rounded-full bg-black transition-[width] duration-300 ease-out" style={{ width: `${progress}%` }} />
+            </div>
+            <p className="mt-3 text-[12px] text-zinc-500">{loadingMessage}</p>
+          </div>
+          <div className="absolute bottom-5 left-1/2 flex -translate-x-1/2 items-center gap-5 rounded-full border border-zinc-200 bg-white px-5 py-3 text-zinc-300 shadow-xl"><span className="text-black">➤</span><span>♨</span><span>□</span><span>○</span><span>T</span><span>▣</span><span>•••</span></div>
+        </main>
+        <aside className="w-72 shrink-0 border-l border-zinc-200 p-5">
+          <div className="mb-7 h-3 w-12 rounded-full bg-zinc-200" />
+          <div className="space-y-6 animate-pulse">
+            <div className="h-2.5 w-24 rounded-full bg-zinc-200" />
+            <div className="grid grid-cols-[36px_1fr] gap-3"><div className="h-9 rounded-lg bg-zinc-200" /><div className="h-9 rounded-lg bg-zinc-100" /></div>
+            <div><div className="mb-3 h-2.5 w-20 rounded-full bg-zinc-200" /><div className="h-2 rounded-full bg-zinc-200" /></div>
+            <div className="grid grid-cols-4 gap-3">{[0, 1, 2, 3].map((item) => <div key={item} className="h-9 rounded-lg bg-zinc-200" />)}</div>
+            <div className="h-px bg-zinc-200" />
+            {[0, 1, 2].map((item) => <div key={item}><div className="mb-3 h-2.5 w-16 rounded-full bg-zinc-200" /><div className="h-12 rounded-lg border border-zinc-200 bg-zinc-50" /></div>)}
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function NodeView({ n, scale, onDown, onDblClick, onContext, onTextChange, onFinishEdit, onCancelEdit, editingId, dragVisual }: { n: CNode; scale: number; onDown?: (e: React.MouseEvent, n: CNode) => void; onDblClick?: (n: CNode) => void; onContext?: (e: React.MouseEvent, n: CNode) => void; onTextChange?: (id: string, text: string) => void; onFinishEdit?: (id: string, text: string) => void; onCancelEdit?: () => void; editingId?: string | null; dragVisual?: { id: string; dx: number; dy: number } | null }) {
   if (n.visible === false) return null;
   const padRaw = n.props.pad ?? 0;
   const padH = n.props.padH ?? padRaw;
@@ -1022,6 +1199,9 @@ function NodeView({ n, scale, onDown, onDblClick, onContext, onTextChange, onFin
     : "";
   const gradientColors = (n.props.gradientColors?.length ? n.props.gradientColors : [n.props.fill || "#ffffff", "#00000000"])
     .map((color) => colorWithOpacity(color, n.props.fillOpacity ?? 1));
+  const isTextNode = n.type === "text";
+  const textHorizontal = n.props.textAlign ?? "left";
+  const textVertical = n.props.textVerticalAlign ?? "top";
 
   const base: React.CSSProperties = {
     position: "absolute",
@@ -1039,7 +1219,9 @@ function NodeView({ n, scale, onDown, onDblClick, onContext, onTextChange, onFin
     fontSize: (n.props.size || 14) * scale,
     fontFamily: n.props.fontFamily,
     letterSpacing: n.props.letterSpacing,
-    lineHeight: n.props.lineHeight,
+    lineHeight: `${n.props.lineHeight ?? (n.props.size ?? n.props.fontSize ?? 14) * 1.2}px`,
+    fontWeight: n.props.weight ?? 400,
+    whiteSpace: n.type === "text" ? "pre" : undefined,
     paddingTop: (positionsChildrenWithAutoLayout ? 0 : padTop) * scale,
     paddingRight: (positionsChildrenWithAutoLayout ? 0 : padRight) * scale,
     paddingBottom: (positionsChildrenWithAutoLayout ? 0 : padBottom) * scale,
@@ -1047,7 +1229,7 @@ function NodeView({ n, scale, onDown, onDblClick, onContext, onTextChange, onFin
     borderRadius: n.props.shapeKind === "ellipse" ? "9999px" : (n.props.radius ?? (n.type === "text" || n.type === "image" ? 0 : 8)) * scale,
     display: n.type === "image" ? "block" : (n.props.autoLayout || n.type === "row" || n.type === "section" || n.type === "component" || !!n.children ? "flex" : "flex"),
     flexDirection: n.props.direction === "col" ? "column" : "row",
-    alignItems: n.props.align === "stretch"
+    alignItems: isTextNode ? (textVertical === "center" ? "center" : textVertical === "bottom" ? "flex-end" : "flex-start") : n.props.align === "stretch"
       ? "stretch"
       : n.props.align === "between"
       ? "space-between"
@@ -1056,7 +1238,7 @@ function NodeView({ n, scale, onDown, onDblClick, onContext, onTextChange, onFin
       : n.props.align === "end"
       ? "flex-end"
       : "flex-start",
-    justifyContent: n.props.justify === "stretch"
+    justifyContent: isTextNode ? (textHorizontal === "center" ? "center" : textHorizontal === "right" ? "flex-end" : "flex-start") : n.props.justify === "stretch"
       ? "space-between"
       : n.props.justify === "between"
       ? "space-between"
@@ -1070,26 +1252,36 @@ function NodeView({ n, scale, onDown, onDblClick, onContext, onTextChange, onFin
     border: strokeWidth && strokePosition === "center" ? `${strokeWidth}px solid ${strokeColor}` : "none",
     boxShadow: strokeShadow || undefined,
     overflow: n.props.wrap ? "visible" : "hidden",
-    opacity: n.props.opacity ?? 1,
+    opacity: dragVisual?.id === n.id ? 0.9 : (n.props.opacity ?? 1),
     filter: n.props.blur ? `blur(${n.props.blur}px)` : "none",
-    transform: n.rotation ? `rotate(${n.rotation}deg)` : undefined,
+    transform: `${dragVisual?.id === n.id ? `translate(${dragVisual.dx}px, ${dragVisual.dy}px) ` : ""}${n.rotation ? `rotate(${n.rotation}deg)` : ""}` || undefined,
     transformOrigin: "center",
+    transition: dragVisual?.id === n.id ? "none" : "left 150ms cubic-bezier(0.2, 0, 0, 1), top 150ms cubic-bezier(0.2, 0, 0, 1), width 120ms ease, height 120ms ease",
+    zIndex: dragVisual?.id === n.id ? 999 : n.zIndex,
+    userSelect: editingId === n.id ? "text" : "none",
+    textAlign: textHorizontal,
+    textDecoration: n.props.textDecoration === "line-through" ? "line-through" : n.props.textDecoration === "underline" ? "underline" : "none",
   };
-  const align: React.CSSProperties = n.props.text && !n.props.autoLayout && !n.children ? { justifyContent: "flex-start", textAlign: "left" } : {};
+  const align: React.CSSProperties = !isTextNode && n.props.text && !n.props.autoLayout && !n.children ? { justifyContent: "flex-start", textAlign: "left" } : {};
   const clip: React.CSSProperties = scale < 1 ? { overflow: "hidden" } : {};
   const editableText = n.type === "text" || n.type === "button" || n.type === "card" || n.type === "row" || n.type === "section" || n.type === "input";
   const editing = !!editingId && editingId === n.id;
   const textValue = (n.props.text || "").toString();
+  const formattedText = formatCanvasText(n, textValue);
 
   const content = n.type === "input"
     ? <span className="opacity-50">{n.props.placeholder || "Input…"}</span>
     : editing && editableText
     ? <EditableText value={textValue} placeholder={n.props.placeholder} multiline={n.type === "text"} autoFocus={true} className="w-full h-full m-0 p-0 border-0 bg-transparent outline-none overflow-hidden" onChange={(val) => onTextChange?.(n.id, val)} onSave={(val) => onFinishEdit?.(n.id, val)} onCancel={onCancelEdit} />
+    : n.type === "text"
+    ? n.props.truncateText
+      ? <span className="block min-w-0 w-full overflow-hidden text-ellipsis whitespace-nowrap">{formattedText}</span>
+      : <span className="block w-full">{formattedText.split("\n").map((line, index, lines) => <span key={index} className="block" style={{ marginBottom: index < lines.length - 1 ? n.props.paragraphSpacing ?? 0 : 0 }}>{line || "\u00a0"}</span>)}</span>
     : n.children
-    ? <div className="relative w-full h-full">{n.children.map((c) => <NodeView key={c.id} n={c} scale={scale} onDown={onDown} onDblClick={onDblClick} onContext={onContext} onTextChange={onTextChange} onFinishEdit={onFinishEdit} onCancelEdit={onCancelEdit} editingId={editingId} />)}</div>
+    ? <div className="relative w-full h-full">{n.children.map((c) => <NodeView key={c.id} n={c} scale={scale} onDown={onDown} onDblClick={onDblClick} onContext={onContext} onTextChange={onTextChange} onFinishEdit={onFinishEdit} onCancelEdit={onCancelEdit} editingId={editingId} dragVisual={dragVisual} />)}</div>
     : n.type === "image" && n.props.src
     // eslint-disable-next-line @next/next/no-img-element
-    ? <img src={n.props.src} alt={n.props.text || "image"} className="w-full h-full pointer-events-none" draggable={false} style={{ transform: `scale(${n.props.imageScale || 1})`, transformOrigin: "center center", objectFit: (n.props.objectFit || "cover") as React.CSSProperties["objectFit"] }} />
+    ? <img src={n.props.src} alt={n.props.text || "image"} loading="lazy" decoding="async" className="w-full h-full pointer-events-none" draggable={false} style={{ transform: `scale(${n.props.imageScale || 1})`, transformOrigin: "center center", objectFit: (n.props.objectFit || "cover") as React.CSSProperties["objectFit"] }} />
     : n.type === "frame"
     ? (() => {
         const k = n.props.shapeKind || "rect";
@@ -1121,7 +1313,7 @@ function NodeView({ n, scale, onDown, onDblClick, onContext, onTextChange, onFin
 
 function SelectionOverlay({ node, x, y, zoom, showDetails, onResize }: { node: CNode; x: number; y: number; zoom: number; showDetails: boolean; onResize: (e: React.MouseEvent, n: CNode, handle: string) => void }) {
   const inverseZoom = 1 / Math.max(zoom, 0.01);
-  const handleSize = 10 * inverseZoom;
+  const handleSize = 8 * inverseZoom;
   const halfHandle = handleSize / 2;
   const canResize = node.type !== "text" && !node.locked;
   const name = node.name || node.props.name || node.type.charAt(0).toUpperCase() + node.type.slice(1);
@@ -1144,7 +1336,7 @@ function SelectionOverlay({ node, x, y, zoom, showDetails, onResize }: { node: C
         top: y,
         width: node.w,
         height: node.h,
-        borderWidth: 1.5 * inverseZoom,
+        borderWidth: 1 * inverseZoom,
         transform: node.rotation ? `rotate(${node.rotation}deg)` : undefined,
         transformOrigin: "center",
       }}
@@ -1174,7 +1366,7 @@ function SelectionOverlay({ node, x, y, zoom, showDetails, onResize }: { node: C
           height: 10 * inverseZoom,
           left: node.w / 2 - 5 * inverseZoom,
           top: -30 * inverseZoom,
-          borderWidth: 1.5 * inverseZoom,
+          borderWidth: 1 * inverseZoom,
         }}
       />
       <span

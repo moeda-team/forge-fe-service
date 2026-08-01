@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useStore } from "@/lib/store";
 import type { Project, ReqItem, Requirement, RequirementSnapshot } from "@/lib/types";
 
@@ -10,9 +10,11 @@ function itemText(x: string | ReqItem) {
 export default function RequirementPanel({ p, onOpenKanban }: { p: Project; onOpenKanban: () => void }) {
   const sendToKanban = useStore((s) => s.sendToKanban);
   const [sending, setSending] = useState(false);
-  const ts = p.reqUpdatedAt
-    ? new Date(p.reqUpdatedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
-    : "";
+  // timestamp is client-only to avoid SSR/CSR hydration mismatch
+  const [ts, setTs] = useState("");
+  useEffect(() => {
+    if (p.reqUpdatedAt) setTs(new Date(p.reqUpdatedAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }));
+  }, [p.reqUpdatedAt]);
 
   if (!p.req) {
     return (
@@ -37,12 +39,13 @@ export default function RequirementPanel({ p, onOpenKanban }: { p: Project; onOp
   const currentIsArchived = history.some((snapshot) => snapshot.version === curVer);
   const total = (p.kanban?.backlog.length || 0) + (p.kanban?.todo.length || 0) + (p.kanban?.progress.length || 0) + (p.kanban?.done.length || 0);
 
-  const onSend = () => {
+  const onSend = async () => {
     setSending(true);
-    setTimeout(() => {
-      sendToKanban(p.id);
+    try {
+      await sendToKanban(p.id);
+    } finally {
       setSending(false);
-    }, 750);
+    }
   };
 
   return (
@@ -78,7 +81,7 @@ export default function RequirementPanel({ p, onOpenKanban }: { p: Project; onOp
         <span className="text-[10px] font-mono text-zinc-500">v{curVer}</span>
         <span className="text-[10px] font-mono text-zinc-500">auto-generated</span>
         <span className="text-[10px] font-mono text-zinc-500">source of truth</span>
-        {ts && <span suppressHydrationWarning className="text-[10px] font-mono text-zinc-400">{ts}</span>}
+        {ts && <span className="text-[10px] font-mono text-zinc-400">{ts}</span>}
         {sending ? (
           <button disabled className="ml-auto text-[12px] font-semibold px-3 py-1.5 rounded-lg bg-violet-700 text-white opacity-85 cursor-progress flex items-center gap-2">
             <span className="w-3 h-3 border-2 border-white/40 border-t-white rounded-full animate-spin" /> Sending…
@@ -127,22 +130,25 @@ function RequirementBody({ requirement: r }: { requirement: Requirement }) {
 }
 
 function SyncedRequirementCard({ snapshot, defaultOpen }: { snapshot: RequirementSnapshot; defaultOpen: boolean }) {
-  const [openState, setOpenState] = useState({ version: snapshot.version, defaultOpen, value: defaultOpen });
-  const open = openState.version === snapshot.version && openState.defaultOpen === defaultOpen ? openState.value : defaultOpen;
-  const sentAt = new Date(snapshot.sentAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const [open, setOpen] = useState(defaultOpen);
+  const [sentAt, setSentAt] = useState("");
+  useEffect(() => setOpen(defaultOpen), [defaultOpen]);
+  useEffect(() => {
+    setSentAt(new Date(snapshot.sentAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }));
+  }, [snapshot.sentAt]);
 
   return (
     <div className="overflow-hidden rounded-2xl border border-emerald-200 bg-emerald-50/60 shadow-sm">
       <button
         type="button"
-        onClick={() => setOpenState({ version: snapshot.version, defaultOpen, value: !open })}
+        onClick={() => setOpen((value) => !value)}
         className="flex w-full items-center gap-2 px-4 py-3 text-left transition hover:bg-emerald-50"
         aria-expanded={open}
       >
         <span className="grid h-5 w-5 place-items-center rounded-full bg-emerald-100 text-[11px] font-bold text-emerald-700">✓</span>
         <span className="text-[12px] font-semibold text-zinc-800">Requirement v{snapshot.version}</span>
         <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Sent to Kanban</span>
-        <span suppressHydrationWarning className="ml-auto text-[10px] text-zinc-400">{sentAt}</span>
+        {sentAt && <span className="ml-auto text-[10px] text-zinc-400">{sentAt}</span>}
         <span className={`text-[11px] text-zinc-400 transition-transform ${open ? "rotate-180" : ""}`}>⌄</span>
       </button>
       {open && (

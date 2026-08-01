@@ -1,15 +1,19 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
-import { getScreen, replaceScreens, SCREENS, useStore, useCanvas } from "@/lib/store";
-import { loadWorkspace, saveWorkspace, withoutTransientCanvasData } from "@/lib/workspaceStorage";
-import { hydrateWorkspace, importLocalWorkspace, persistCanvas } from "@/lib/api";
+import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
+import { useStore, useCanvas } from "@/lib/store";
 import Sidebar from "@/components/Sidebar";
 import ProjectView from "@/components/ProjectView";
 import AIWorkspace from "@/components/AIWorkspace";
 import Kanban from "@/components/Kanban";
-import DesignCanvas from "@/components/DesignCanvas";
 import ProductTour, { TOUR_STORAGE_KEY } from "@/components/ProductTour";
 import AuthGate from "@/components/AuthGate";
+import ArtifactCanvas from "@/components/ArtifactCanvas";
+
+const DesignCanvas = dynamic(() => import("@/components/DesignCanvas"), {
+  ssr: false,
+  loading: () => <div className="flex-1 bg-zinc-50" aria-label="Loading Design Canvas" />,
+});
 
 export default function Home() {
   const view = useStore((s) => s.view);
@@ -18,26 +22,35 @@ export default function Home() {
   const canvasMode = useCanvas((s) => s.canvas.mode);
   const canvasScreen = useCanvas((s) => s.canvas.screen);
   const [navigationReady, setNavigationReady] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
+  const [locationRestored, setLocationRestored] = useState(false);
   const [tourStep, setTourStep] = useState<number | null>(null);
+  const apiEnabled = useStore((s) => s.apiEnabled);
+  const apiReady = useStore((s) => s.apiReady);
+  const authRequired = useStore((s) => s.authRequired);
+  const bootstrapApi = useStore((s) => s.bootstrapApi);
+  const currentId = useStore((s) => s.currentId);
+  const openProject = useStore((s) => s.openProject);
+  const artifactKind = useStore((s) => s.artifactKind);
+  const setArtifactCanvas = useStore((s) => s.setArtifactCanvas);
 
-  const hydrate = useCallback(async () => {
-    const recovery = loadWorkspace();
-    const remote = await hydrateWorkspace();
-    if (remote.projects.length === 0 && recovery?.projects.length) {
-      try { await importLocalWorkspace(remote.workspaceId, recovery); } catch { /* one-time imports are intentionally safe to retry after refresh */ }
-      const imported = await hydrateWorkspace();
-      replaceScreens(imported.screens); useStore.setState({ projects: imported.projects, currentId: imported.projects[0]?.id ?? null, aiLog: imported.aiLog });
-    } else { replaceScreens(remote.screens); useStore.setState({ projects: remote.projects, currentId: remote.projects[0]?.id ?? null, aiLog: remote.aiLog }); }
-    setAuthenticated(true); setNavigationReady(true);
+  useEffect(() => { void bootstrapApi(); }, [bootstrapApi]);
+
+  useEffect(() => {
+    setNavigationReady(true);
   }, []);
 
   useEffect(() => {
-    if (!authenticated) return;
+    if (!navigationReady || (apiEnabled && !apiReady) || locationRestored) return;
     try {
       const saved = window.sessionStorage.getItem("forge:location");
-      const location = saved ? JSON.parse(saved) as { view?: string; canvasMode?: "board" | "screen"; canvasScreen?: string } : null;
-      const reopenCanvas = window.location.hash === "#design" || location?.view === "design";
+      const location = saved ? JSON.parse(saved) as { view?: string; currentId?: string; canvasScreen?: string; artifactKind?: "frontend" | "backend" | "database" | "testing" } : null;
+      const targetView = location?.view;
+      if (!authRequired && location?.currentId && ["ai", "kanban", "design", "artifact"].includes(targetView || "")) {
+        openProject(location.currentId);
+        if (targetView === "artifact" && location.artifactKind) setArtifactCanvas(location.artifactKind);
+        else if (targetView && targetView !== "ai") setView(targetView as "kanban" | "design");
+      }
+      const reopenCanvas = window.location.hash === "#design" || targetView === "design";
       if (reopenCanvas) {
         if (location?.canvasScreen) useCanvas.getState().setCanvasScreen(location.canvasScreen);
         useCanvas.getState().setCanvasMode("screen");
@@ -45,71 +58,34 @@ export default function Home() {
       }
     } catch {
       window.sessionStorage.removeItem("forge:location");
+    } finally {
+      setLocationRestored(true);
     }
-  }, [authenticated, setView]);
+  }, [apiEnabled, apiReady, authRequired, locationRestored, navigationReady, openProject, setArtifactCanvas, setView]);
 
   useEffect(() => {
-    if (!navigationReady) return;
-    let timeout: number | undefined;
-    const save = () => {
-      if (timeout) window.clearTimeout(timeout);
-      const projectState = useStore.getState();
-      const canvasState = useCanvas.getState().canvas;
-      saveWorkspace({
-        version: 1,
-        projects: projectState.projects,
-        currentId: projectState.currentId,
-        aiLog: projectState.aiLog,
-        screens: SCREENS,
-        canvas: withoutTransientCanvasData(canvasState),
-      });
-    };
-    const scheduleSave = () => {
-      if (timeout) window.clearTimeout(timeout);
-      timeout = window.setTimeout(save, 250);
-    };
-    const unsubscribeStore = useStore.subscribe(scheduleSave);
-    const unsubscribeCanvas = useCanvas.subscribe(scheduleSave);
-    window.addEventListener("pagehide", save);
-    scheduleSave();
-    const saveRemoteCanvas = () => { const state = useStore.getState(); const screen = getScreen(useCanvas.getState().canvas.screen); if (state.currentId && screen?.projectId === state.currentId) void persistCanvas(state.currentId, screen, useCanvas.getState().canvas.guides).catch(() => undefined); };
-    const remoteTimer = window.setInterval(saveRemoteCanvas, 2000);
-    return () => {
-      if (timeout) window.clearTimeout(timeout);
-      unsubscribeStore();
-      unsubscribeCanvas();
-      window.removeEventListener("pagehide", save);
-      window.clearInterval(remoteTimer);
-      saveRemoteCanvas();
-      save();
-    };
-  }, [navigationReady]);
-
-  useEffect(() => {
-    if (!navigationReady) return;
+    if (!navigationReady || !locationRestored) return;
     if (view === "design" && canvasMode !== "screen") {
       useCanvas.getState().setCanvasMode("screen");
       return;
     }
-    window.sessionStorage.setItem("forge:location", JSON.stringify({ view, canvasScreen }));
-    const nextHash = view === "design" ? "#design" : "";
+    window.sessionStorage.setItem("forge:location", JSON.stringify({ view, currentId, canvasScreen, artifactKind }));
+    const nextHash = view === "design" ? "#design" : view === "artifact" ? `#${artifactKind}` : "";
     const nextUrl = `${window.location.pathname}${window.location.search}${nextHash}`;
     window.history.replaceState(window.history.state, "", nextUrl);
-  }, [canvasMode, canvasScreen, navigationReady, view]);
+  }, [artifactKind, canvasMode, canvasScreen, currentId, locationRestored, navigationReady, view]);
 
   useEffect(() => {
     if (!navigationReady || view !== "projects" || tourStep !== null) return;
-    if (window.localStorage.getItem(TOUR_STORAGE_KEY) === "complete") return;
-    const timer = window.setTimeout(() => setTourStep(0), 0);
-    return () => window.clearTimeout(timer);
+    if (window.localStorage.getItem(TOUR_STORAGE_KEY) !== "complete") setTourStep(0);
   }, [navigationReady, tourStep, view]);
 
   const handleBack = () => {
     setView(prevView || "projects");
   };
 
-  if (!authenticated) return <AuthGate onAuthenticated={hydrate} />;
-  if (!navigationReady) return <div className="h-screen bg-zinc-50" />;
+  if (!navigationReady || !locationRestored || (apiEnabled && !apiReady)) return <div className="h-screen bg-zinc-50" />;
+  if (apiEnabled && authRequired) return <AuthGate />;
 
   return (
     <div className="h-screen flex bg-zinc-50 text-zinc-900">
@@ -118,6 +94,7 @@ export default function Home() {
       {view === "ai" && <AIWorkspace />}
       {view === "kanban" && <Kanban />}
       {view === "design" && <DesignCanvas onBack={handleBack} />}
+      {view === "artifact" && <ArtifactCanvas />}
       {tourStep !== null && <ProductTour step={tourStep} onStepChange={setTourStep} onClose={() => setTourStep(null)} />}
     </div>
   );

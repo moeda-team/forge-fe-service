@@ -1,49 +1,222 @@
-import type { CNode, KanbanCard, Project, Requirement, Screen } from "./types";
-import type { PersistedWorkspace } from "./workspaceStorage";
+import type { ArtifactKind, CanvasArtifact, CNode, Guide, HistoryEntry, KanbanCard, OrchestrationRun, Project, Requirement, ScreenSettings } from "./types";
 
-const API_URL = process.env.NEXT_PUBLIC_FORGE_API_URL ?? "http://localhost:4000";
-type Envelope<T> = { data: T };
-type Session = { accessToken: string; user: { id: string; email: string; name: string } };
-let accessToken: string | null = null;
-let activeWorkspaceId: string | null = null;
-export const session = { get token() { return accessToken; }, clear() { accessToken = null; }, set(token: string) { accessToken = token; } };
+const API_URL = (process.env.NEXT_PUBLIC_FORGE_API_URL || "").replace(/\/$/, "");
+const TOKEN_KEY = "forge:access-token";
+
+export const apiEnabled = Boolean(API_URL);
+
+export class ApiError extends Error {
+  constructor(public status: number, public code: string, message: string) {
+    super(message);
+  }
+}
+
+export function getAccessToken() {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(TOKEN_KEY);
+}
+
+export function setAccessToken(token: string | null) {
+  if (typeof window === "undefined") return;
+  if (token) window.localStorage.setItem(TOKEN_KEY, token);
+  else window.localStorage.removeItem(TOKEN_KEY);
+}
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, { ...init, credentials: "include", headers: { "content-type": "application/json", ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}), ...init.headers } });
-  const body = await response.json().catch(() => null) as Envelope<T> | { error?: { message?: string } } | null;
-  if (!response.ok) throw new Error((body as { error?: { message?: string } } | null)?.error?.message ?? "Forge API request failed");
-  return (body as Envelope<T>).data;
+  if (!API_URL) throw new ApiError(0, "API_DISABLED", "Backend API URL is not configured");
+  const token = getAccessToken();
+  const response = await fetch(`${API_URL}${path}`, {
+    ...init,
+    cache: "no-store",
+    headers: {
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...init.headers,
+    },
+  });
+  if (response.status === 204) return undefined as T;
+  const payload = await response.json().catch(() => null) as { error?: { code?: string; message?: string } } | null;
+  if (!response.ok) {
+    if (response.status === 401) setAccessToken(null);
+    throw new ApiError(response.status, payload?.error?.code || "REQUEST_FAILED", payload?.error?.message || "Request failed");
+  }
+  return payload as T;
 }
-export const authApi = {
-  async register(name: string, email: string, password: string) { const result = await request<Session>("/api/v1/auth/register", { method: "POST", body: JSON.stringify({ name, email, password }) }); accessToken = result.accessToken; return result; },
-  async login(email: string, password: string) { const result = await request<Session>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }); accessToken = result.accessToken; return result; },
-  async restore() { const result = await request<Session>("/api/v1/auth/refresh", { method: "POST", body: "{}" }); accessToken = result.accessToken; return result; },
-  async logout() { await request<{ ok: boolean }>("/api/v1/auth/logout", { method: "POST", body: "{}" }); accessToken = null; },
+
+export const forgeApi = {
+  async login(email: string, password: string) {
+    const result = await request<{ token: string; user: { id: string; email: string; name?: string } }>("/api/auth/login", {
+      method: "POST", body: JSON.stringify({ email, password }),
+    });
+    setAccessToken(result.token);
+    return result.user;
+  },
+  async register(name: string, email: string, password: string) {
+    const result = await request<{ token: string; user: { id: string; email: string; name?: string } }>("/api/auth/register", {
+      method: "POST", body: JSON.stringify({ name, email, password }),
+    });
+    setAccessToken(result.token);
+    return result.user;
+  },
+  me: () => request<{ id: string; email: string; name?: string }>("/api/auth/me"),
+  listProjects: () => request<ApiProject[]>("/api/projects"),
+  getProject: (id: string) => request<ApiProjectDetail>(`/api/projects/${id}`),
+  createProject: (name: string, desc: string) => request<ApiProject>("/api/projects", {
+    method: "POST", body: JSON.stringify({ name, desc, type: "Project" }),
+  }),
+  getChatHistory: (projectId: string, limit = 100, cursor?: string) =>
+    request<ApiChatHistory>(`/api/ai/chat/${projectId}?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  getRequirementHistory: (projectId: string) =>
+    request<ApiRequirementHistory>(`/api/projects/${projectId}/requirement`),
+  chat: (projectId: string, text: string, model?: string, attachments?: Record<string, number>) =>
+    request<ApiChatResult>("/api/ai/chat", {
+      method: "POST", body: JSON.stringify({ projectId, text, model, attachments }),
+    }),
+  syncKanban: (projectId: string) => request<KanbanSyncResult>(`/api/projects/${projectId}/kanban/sync`, { method: "POST" }),
+  reorderKanban: (projectId: string, cards: { id: string; status: KanbanCard["status"]; order: number }[]) =>
+    request<NonNullable<Project["kanban"]>>(`/api/projects/${projectId}/kanban/reorder`, {
+      method: "PATCH", body: JSON.stringify({ cards }),
+    }),
+  listScreens: (projectId: string) => request<ApiScreen[]>(`/api/projects/${projectId}/screens`),
+  createScreen: (projectId: string, name: string, w = 1440, h = 1024, settings?: Partial<ScreenSettings>) => request<ApiScreen>(`/api/projects/${projectId}/screens`, {
+    method: "POST", body: JSON.stringify({ name, w, h, settings }),
+  }),
+  getScreenDocument: (screenId: string) => request<{ id: string; nodes: CNode[]; guides: Guide[]; settings?: Partial<ScreenSettings>; revision: number }>(`/api/screens/${screenId}/nodes`),
+  saveScreenDocument: (screenId: string, input: {
+    revision: number;
+    name: string;
+    w: number;
+    h: number;
+    nodes: CNode[];
+    guides: Guide[];
+    settings: Partial<ScreenSettings>;
+    history?: Pick<HistoryEntry, "action" | "payload" | "inverse" | "affectedIds">;
+  }) => request<{ id: string; name: string; w: number; h: number; revision: number; stale: boolean; updatedAt: string }>(`/api/screens/${screenId}/document`, {
+    method: "PUT", body: JSON.stringify(input),
+  }),
+  saveScreenNodes: (screenId: string, nodes: CNode[]) => request(`/api/screens/${screenId}/nodes`, {
+    method: "PUT", body: JSON.stringify({ nodes }),
+  }),
+  saveScreenGuides: (screenId: string, guides: Guide[]) => request(`/api/screens/${screenId}/guides`, {
+    method: "PUT", body: JSON.stringify({ guides }),
+  }),
+  updateScreen: (screenId: string, input: { name?: string; w?: number; h?: number; settings?: Partial<ScreenSettings> }) => request<ApiScreen>(`/api/screens/${screenId}`, {
+    method: "PATCH", body: JSON.stringify(input),
+  }),
+  deleteScreen: (screenId: string) => request<void>(`/api/screens/${screenId}`, { method: "DELETE" }),
+  duplicateScreen: (screenId: string, name: string) => request<ApiScreen>(`/api/screens/${screenId}/duplicate`, {
+    method: "POST", body: JSON.stringify({ name }),
+  }),
+  getScreenHistory: (screenId: string, limit = 50) => request<ApiHistoryEntry[]>(`/api/screens/${screenId}/history?limit=${limit}`),
+  saveScreenHistory: (screenId: string, entry: HistoryEntry) => request<ApiHistoryEntry>(`/api/screens/${screenId}/history`, {
+    method: "POST",
+    body: JSON.stringify({ action: entry.action, payload: entry.payload, inverse: entry.inverse, affectedIds: entry.affectedIds }),
+  }),
+  listArtifacts: (projectId: string) => request<CanvasArtifact[]>(`/api/projects/${projectId}/artifacts`),
+  orchestrateArtifacts: (projectId: string, kinds?: ArtifactKind[]) => request<CanvasArtifact[]>(`/api/projects/${projectId}/artifacts/orchestrate`, {
+    method: "POST", body: JSON.stringify(kinds ? { kinds } : {}),
+  }),
+  getArtifactBundle: (projectId: string) => request<{ format: string; version: number; project: { id: string; name: string; requirementVersion: number }; exportedAt: string; artifacts: CanvasArtifact[] }>(`/api/projects/${projectId}/artifacts/bundle`),
+  getLatestOrchestration: (projectId: string) => request<OrchestrationRun | null>(`/api/projects/${projectId}/orchestration/latest`),
+  listOrchestrationRuns: (projectId: string, limit = 10) => request<OrchestrationRun[]>(`/api/projects/${projectId}/orchestration/runs?limit=${limit}`),
+  runOrchestration: (projectId: string, trigger: OrchestrationRun["trigger"] = "automatic", kinds?: ArtifactKind[]) => request<OrchestrationRun>(`/api/projects/${projectId}/orchestration/run`, {
+    method: "POST", body: JSON.stringify({ trigger, ...(kinds ? { kinds } : {}) }),
+  }),
 };
-type RemoteProject = { id: string; name: string; type: string; description: string; stage: number; progress: number; live: boolean; updatedAt: string };
-type RemoteRequirement = { version: number; content: Requirement; kanbanSyncedVersion: number | null; updatedAt: string } | null;
-type RemoteCard = { id: string; title: string; canvas: string | null; requirementRef: string | null; status: "BACKLOG" | "TODO" | "PROGRESS" | "DONE" };
-const statusMap = { BACKLOG: "backlog", TODO: "todo", PROGRESS: "progress", DONE: "done" } as const;
-function projectFromRemote(project: RemoteProject, requirement: RemoteRequirement, cards: RemoteCard[]): Project {
-  const kanban = { backlog: [] as KanbanCard[], todo: [] as KanbanCard[], progress: [] as KanbanCard[], done: [] as KanbanCard[] };
-  cards.forEach((card) => kanban[statusMap[card.status]].push({ id: card.id, title: card.title, canvas: card.canvas, reqRef: card.requirementRef ?? undefined, status: statusMap[card.status] }));
-  return { id: project.id, name: project.name, type: project.type, stage: project.stage as Project["stage"], prog: project.progress, live: project.live, req: !!requirement, requirement: requirement?.content, reqVersion: requirement?.version, reqUpdatedAt: requirement ? new Date(requirement.updatedAt).getTime() : undefined, kanbanSyncedVer: requirement?.kanbanSyncedVersion ?? undefined, kanban, owners: [], desc: project.description, updated: new Date(project.updatedAt).toLocaleDateString() };
+
+export type ApiScreen = { id: string; name: string; w: number; h: number; revision: number; settings?: Partial<ScreenSettings> };
+type ApiHistoryEntry = { id: string; action: HistoryEntry["action"]; payload: unknown; inverse: unknown; affectedIds: string[]; createdAt: string };
+export type KanbanSyncResult = { added: number; updated: number; obsolete: number; version: number };
+
+type ApiRequirement = Requirement & { version?: number; updatedAt?: string; createdAt?: string };
+
+type ApiRequirementVersion = ApiRequirement & {
+  id: string;
+  version: number;
+  sentAt?: string | null;
+  snapshots?: { version: number; requirementData: Requirement; sentAt: string }[];
+};
+
+type ApiRequirementHistory = {
+  current?: ApiRequirementVersion | null;
+  history: ApiRequirementVersion[];
+};
+
+type ApiChatHistory = {
+  items: { id: string; role: "ai" | "user"; text: string; model?: string | null; at: number }[];
+  nextCursor?: string | null;
+};
+
+type ApiProject = Omit<Project, "stage" | "reqUpdatedAt"> & {
+  stage: number;
+  reqUpdatedAt?: string | null;
+};
+
+type ApiProjectDetail = ApiProject & {
+  requirement?: ApiRequirement | null;
+  kanban?: Project["kanban"];
+};
+
+type ApiChatResult = {
+  role: "ai";
+  text: string;
+  mode: "gemini" | "local";
+  model?: string;
+  requirement: ApiRequirement;
+  history: { role: "ai" | "user"; text: string; at: number }[];
+};
+
+export function mapProject(project: ApiProject | ApiProjectDetail): Project {
+  const detail = project as ApiProjectDetail;
+  return {
+    ...project,
+    stage: Math.max(0, Math.min(4, project.stage)) as Project["stage"],
+    owners: Array.isArray(project.owners) ? project.owners : [],
+    reqUpdatedAt: project.reqUpdatedAt ? new Date(project.reqUpdatedAt).getTime() : undefined,
+    requirement: detail.requirement ? mapRequirement(detail.requirement) : undefined,
+    reqVersion: detail.requirement?.version || project.reqVersion,
+    kanban: detail.kanban ? mapKanban(detail.kanban) : undefined,
+  };
 }
-function nestedNodes(nodes: Array<Record<string, unknown>>): CNode[] {
-  const map = new Map<string, CNode>(); const roots: CNode[] = [];
-  nodes.forEach((node) => map.set(String(node.id), { id: String(node.id), type: node.type as CNode["type"], parentId: typeof node.parentId === "string" ? node.parentId : undefined, name: typeof node.name === "string" ? node.name : undefined, x: Number(node.x), y: Number(node.y), w: Number(node.width), h: Number(node.height), rotation: Number(node.rotation ?? 0), zIndex: Number(node.zIndex ?? 0), visible: node.visible !== false, locked: node.locked === true, props: (node.props ?? {}) as CNode["props"], children: [] }));
-  map.forEach((node) => { if (node.parentId && map.has(node.parentId)) map.get(node.parentId)!.children!.push(node); else roots.push(node); }); return roots;
+
+export function mapRequirement(requirement: ApiRequirement): Requirement {
+  return {
+    prd: requirement.prd,
+    stories: requirement.stories || [],
+    fr: requirement.fr || [],
+    nfr: requirement.nfr || [],
+    ac: requirement.ac || [],
+    rules: requirement.rules || [],
+  };
 }
-export async function hydrateWorkspace(): Promise<{ workspaceId: string; projects: Project[]; screens: Screen[]; aiLog: PersistedWorkspace["aiLog"] }> {
-  const me = await request<{ workspaces: Array<{ id: string }> }>("/api/v1/me"); const workspaceId = me.workspaces[0]?.id; if (!workspaceId) throw new Error("No workspace is available");
-  activeWorkspaceId = workspaceId;
-  const listed = await request<{ items: RemoteProject[] }>(`/api/v1/workspaces/${workspaceId}/projects`);
-  const data = await Promise.all(listed.items.map(async (project) => { const [requirement, cards, messages, screens] = await Promise.all([request<RemoteRequirement>(`/api/v1/projects/${project.id}/requirement`), request<RemoteCard[]>(`/api/v1/projects/${project.id}/kanban`), request<Array<{ role: "user" | "assistant"; content: string; createdAt: string }>>(`/api/v1/projects/${project.id}/chat`), request<Array<Record<string, unknown>>>(`/api/v1/projects/${project.id}/canvas`)]); return { project: projectFromRemote(project, requirement, cards), messages, screens: screens.map((screen) => ({ name: String(screen.name), w: Number(screen.width), h: Number(screen.height), projectId: project.id, nodes: nestedNodes((screen.nodes ?? []) as Array<Record<string, unknown>>) })) }; }));
-  return { workspaceId, projects: data.map((entry) => entry.project), screens: data.flatMap((entry) => entry.screens), aiLog: Object.fromEntries(data.map((entry) => [entry.project.id, entry.messages.map((message) => ({ role: message.role === "assistant" ? "ai" as const : "user" as const, text: message.content, at: new Date(message.createdAt).getTime() }))])) };
+
+export function mapRequirementSnapshots(payload: ApiRequirementHistory) {
+  const snapshots = new Map<number, { version: number; requirement: Requirement; sentAt: number }>();
+  for (const version of payload.history || []) {
+    for (const snapshot of version.snapshots || []) {
+      snapshots.set(snapshot.version, {
+        version: snapshot.version,
+        requirement: mapRequirement(snapshot.requirementData as ApiRequirement),
+        sentAt: new Date(snapshot.sentAt).getTime(),
+      });
+    }
+    if (!snapshots.has(version.version) && version.sentAt) {
+      snapshots.set(version.version, {
+        version: version.version,
+        requirement: mapRequirement(version),
+        sentAt: new Date(version.sentAt).getTime(),
+      });
+    }
+  }
+  return Array.from(snapshots.values()).sort((a, b) => a.version - b.version);
 }
-export async function importLocalWorkspace(workspaceId: string, snapshot: PersistedWorkspace) { return request(`/api/v1/workspaces/${workspaceId}/imports/local-workspace`, { method: "POST", body: JSON.stringify(snapshot) }); }
-export async function persistCanvas(projectId: string, screen: Screen, guides: unknown[] = []) { const flatten = (nodes: CNode[], parentId?: string): Array<Record<string, unknown>> => nodes.flatMap((node, index) => [{ id: node.id, type: node.type, parentId: node.parentId ?? parentId, name: node.name, x: node.x, y: node.y, width: node.w, height: node.h, rotation: node.rotation ?? 0, zIndex: node.zIndex ?? index, visible: node.visible !== false, locked: node.locked === true, props: node.props }, ...(node.children ? flatten(node.children, node.id) : [])]); return request(`/api/v1/projects/${projectId}/canvas/screens/${encodeURIComponent(screen.name)}`, { method: "PATCH", body: JSON.stringify({ name: screen.name, width: screen.w, height: screen.h, nodes: flatten(screen.nodes), guides }) }); }
-export async function createProject(workspaceId: string, name: string, description = "") { return request<RemoteProject>(`/api/v1/workspaces/${workspaceId}/projects`, { method: "POST", body: JSON.stringify({ name, description }) }); }
-export async function createCurrentWorkspaceProject(name: string, description = "") { if (!activeWorkspaceId) throw new Error("Workspace is not hydrated"); return createProject(activeWorkspaceId, name, description); }
-export async function assistantMessage(projectId: string, message: string) { return request<{ message: string; requirement: { version: number; content: Requirement } }>(`/api/v1/projects/${projectId}/assistant/messages`, { method: "POST", body: JSON.stringify({ message }) }); }
-export async function syncKanban(projectId: string) { return request<{ cards: RemoteCard[]; version: number }>(`/api/v1/projects/${projectId}/kanban/sync`, { method: "POST", body: "{}" }); }
+
+function mapKanban(kanban: NonNullable<Project["kanban"]>) {
+  const mapCards = (cards: KanbanCard[] = []) => cards.map((card) => ({ ...card, status: card.status }));
+  return {
+    backlog: mapCards(kanban.backlog),
+    todo: mapCards(kanban.todo),
+    progress: mapCards(kanban.progress),
+    done: mapCards(kanban.done),
+  };
+}

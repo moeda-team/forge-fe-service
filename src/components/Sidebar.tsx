@@ -1,12 +1,19 @@
 "use client";
 import { useCanvas, useStore } from "@/lib/store";
+import type { ArtifactKind } from "@/lib/types";
 
 const NAV = [
   { key: "ai", label: "AI Workspace", icon: "✦" },
   { key: "kanban", label: "Kanban", icon: "☰" },
 ] as const;
 
-const CANVASES = ["Design Canvas", "Frontend Canvas", "Backend Canvas", "Database Canvas", "Testing Canvas", "Brand Canvas"];
+const CANVASES: { label: string; kind: "design" | ArtifactKind; icon: string }[] = [
+  { label: "Design Canvas", kind: "design", icon: "layout" },
+  { label: "Frontend Canvas", kind: "frontend", icon: "</>" },
+  { label: "Backend Canvas", kind: "backend", icon: "⌘" },
+  { label: "Database Canvas", kind: "database", icon: "◉" },
+  { label: "Testing Canvas", kind: "testing", icon: "✓" },
+];
 
 function LayoutIcon() {
   return (
@@ -20,6 +27,8 @@ function LayoutIcon() {
 export default function Sidebar() {
   const view = useStore((s) => s.view);
   const setView = useStore((s) => s.setView);
+  const artifactKind = useStore((s) => s.artifactKind);
+  const setArtifactCanvas = useStore((s) => s.setArtifactCanvas);
   const current = useStore((s) => s.current());
   const setCanvasScreen = useCanvas((s) => s.setCanvasScreen);
 
@@ -61,24 +70,19 @@ export default function Sidebar() {
           </button>
         ))}
         <div className="px-3 pt-4 pb-1 text-[10px] uppercase tracking-wider text-zinc-400">Canvases</div>
-        {CANVASES.map((c) => (
+        {CANVASES.map((canvas) => {
+          const active = canvas.kind === "design" ? view === "design" : view === "artifact" && artifactKind === canvas.kind;
+          return (
           <button
-            key={c}
-            data-tour={c === "Design Canvas" ? "design-canvas-menu" : undefined}
-            onClick={() => c === "Design Canvas" && openDesignCanvas()}
-            aria-disabled={c !== "Design Canvas"}
-            className={`flex items-center gap-3 px-3 py-2 text-sm text-left rounded-lg transition ${
-              c === "Design Canvas"
-                ? view === "design"
-                  ? "bg-zinc-900 text-white"
-                  : "text-zinc-600 hover:bg-zinc-100"
-                : "text-zinc-400 cursor-not-allowed"
-            }`}
+            key={canvas.label}
+            data-tour={canvas.kind === "design" ? "design-canvas-menu" : undefined}
+            onClick={() => canvas.kind === "design" ? openDesignCanvas() : setArtifactCanvas(canvas.kind)}
+            className={`flex items-center gap-3 px-3 py-2 text-sm text-left rounded-lg transition ${active ? "bg-zinc-900 text-white" : "text-zinc-600 hover:bg-zinc-100"}`}
           >
-            <span className="w-4 h-4 inline-flex items-center justify-center">{c === "Design Canvas" ? <LayoutIcon /> : "·"}</span>
-            <span>{c}</span>
+            <span className="w-4 h-4 inline-flex items-center justify-center text-[11px] font-semibold">{canvas.icon === "layout" ? <LayoutIcon /> : canvas.icon}</span>
+            <span>{canvas.label}</span>
           </button>
-        ))}
+        );})}
       </nav>
     </aside>
   );

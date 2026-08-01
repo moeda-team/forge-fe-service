@@ -77,8 +77,7 @@ function LayerLabel({
         defaultValue={name}
         onBlur={(e) => onFinish(e.currentTarget.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") onFinish(e.currentTarget.value);
-          if (e.key === "Escape") onFinish(name);
+          if (e.key === "Enter" || e.key === "Escape") onFinish(e.currentTarget.value);
         }}
         onMouseDown={(e) => e.stopPropagation()}
         className="w-full bg-transparent outline-none text-[13px]"
@@ -253,7 +252,10 @@ export default function LayersPanel({ screenName, onBack, palette, onAddNode }: 
   const [query, setQuery] = useState("");
 
   const screen = getScreen(screenName);
-  const layerNodes: LayerNode[] = useMemo(() => (screen ? mapToLayerNodes(screenName, screen.nodes, canvas.selIds) : []), [screenName, screen, canvas.selIds]);
+  const layerNodes: LayerNode[] = useMemo(
+    () => (screen ? mapToLayerNodes(screenName, screen.nodes, canvas.selIds) : []),
+    [screenName, screen, canvas],
+  );
 
   if (!screen) return null;
 

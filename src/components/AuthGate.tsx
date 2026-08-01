@@ -1,11 +1,65 @@
 "use client";
-import { FormEvent, useEffect, useState } from "react";
-import { authApi } from "@/lib/api";
+import { useState } from "react";
+import { useStore } from "@/lib/store";
 
-export default function AuthGate({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
-  const [mode, setMode] = useState<"login" | "register">("login"); const [name, setName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [pending, setPending] = useState(true); const [error, setError] = useState<string | null>(null);
-  useEffect(() => { authApi.restore().then(onAuthenticated).catch(() => undefined).finally(() => setPending(false)); }, [onAuthenticated]);
-  const submit = async (event: FormEvent) => { event.preventDefault(); setError(null); setPending(true); try { if (mode === "login") await authApi.login(email, password); else await authApi.register(name, email, password); await onAuthenticated(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not authenticate"); } finally { setPending(false); } };
-  if (pending) return <main className="grid h-screen place-items-center bg-zinc-50 text-sm text-zinc-500">Connecting to Forge…</main>;
-  return <main className="grid min-h-screen place-items-center bg-zinc-100 p-6"><form onSubmit={submit} className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm"><div className="mb-7"><div className="text-2xl font-bold tracking-tight">Forge</div><p className="mt-2 text-sm text-zinc-500">{mode === "login" ? "Sign in to your workspace." : "Create a personal Forge workspace."}</p></div>{mode === "register" && <label className="mb-4 block text-sm font-medium">Name<input required value={name} onChange={(e) => setName(e.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-300 px-3 py-2.5 font-normal outline-none focus:border-zinc-900" /></label>}<label className="mb-4 block text-sm font-medium">Email<input required type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-300 px-3 py-2.5 font-normal outline-none focus:border-zinc-900" /></label><label className="mb-5 block text-sm font-medium">Password<input required minLength={8} type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1.5 w-full rounded-lg border border-zinc-300 px-3 py-2.5 font-normal outline-none focus:border-zinc-900" /></label>{error && <p className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}<button disabled={pending} className="w-full rounded-lg bg-zinc-900 py-2.5 text-sm font-semibold text-white disabled:opacity-60">{mode === "login" ? "Sign in" : "Create account"}</button><button type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(null); }} className="mt-4 w-full text-sm text-zinc-600 underline">{mode === "login" ? "Need an account? Register" : "Already have an account? Sign in"}</button></form></main>;
+export default function AuthGate() {
+  const login = useStore((state) => state.login);
+  const register = useStore((state) => state.register);
+  const apiError = useStore((state) => state.apiError);
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [pending, setPending] = useState(false);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setPending(true);
+    try {
+      if (mode === "register") await register(name, email, password);
+      else await login(email, password);
+    } catch {
+      // The store exposes the API error below the form.
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <main className="grid min-h-screen place-items-center bg-zinc-100 p-5 text-zinc-900">
+      <form onSubmit={submit} className="w-full max-w-sm rounded-2xl border border-zinc-200 bg-white p-7 shadow-xl">
+        <div className="mb-6 flex items-center gap-3">
+          <div className="grid h-10 w-10 place-items-center rounded-xl bg-zinc-900 font-bold text-white">F</div>
+          <div>
+            <h1 className="font-semibold">Forge</h1>
+            <p className="text-xs text-zinc-500">{mode === "login" ? "Sign in to your workspace" : "Create your workspace account"}</p>
+          </div>
+        </div>
+        {mode === "register" && (
+          <Field label="Name">
+            <input required value={name} onChange={(event) => setName(event.target.value)} className={inputClass} autoComplete="name" />
+          </Field>
+        )}
+        <Field label="Email">
+          <input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} className={inputClass} autoComplete="email" />
+        </Field>
+        <Field label="Password">
+          <input required minLength={8} type="password" value={password} onChange={(event) => setPassword(event.target.value)} className={inputClass} autoComplete={mode === "login" ? "current-password" : "new-password"} />
+        </Field>
+        {apiError && <p className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{apiError}</p>}
+        <button disabled={pending} className="w-full rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-black disabled:opacity-50">
+          {pending ? "Please wait…" : mode === "login" ? "Sign in" : "Create account"}
+        </button>
+        <button type="button" onClick={() => setMode((current) => current === "login" ? "register" : "login")} className="mt-4 w-full text-xs text-zinc-500 hover:text-zinc-900">
+          {mode === "login" ? "New to Forge? Create an account" : "Already have an account? Sign in"}
+        </button>
+      </form>
+    </main>
+  );
+}
+
+const inputClass = "w-full rounded-xl border border-zinc-300 px-3 py-2.5 text-sm outline-none focus:border-zinc-900 focus:ring-2 focus:ring-zinc-200";
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return <label className="mb-4 block"><span className="mb-1.5 block text-xs font-medium">{label}</span>{children}</label>;
 }

@@ -1,18 +1,16 @@
 "use client";
-import { useState } from "react";
-import { useCanvas, SCREENS, findNodeById } from "@/lib/store";
+import { useEffect, useState } from "react";
+import { useCanvas, SCREENS, findNodeById, findParentNode } from "@/lib/store";
 
 function GeometryInput({ label, value, min, wrap, disabled, onCommit }: { label: string; value: number; min?: number; wrap?: boolean; disabled?: boolean; onCommit: (value: number) => void }) {
-  const formatValue = (number: number) => number.toFixed(2).replace(/\.00$/, "");
-  const [draftState, setDraftState] = useState({ value, draft: formatValue(value) });
-  const draft = draftState.value === value ? draftState.draft : formatValue(value);
-  const setDraft = (next: string) => setDraftState({ value, draft: next });
+  const [draft, setDraft] = useState(value.toFixed(2).replace(/\.00$/, ""));
   const [invalid, setInvalid] = useState(false);
+  useEffect(() => setDraft(value.toFixed(2).replace(/\.00$/, "")), [value]);
   const commit = () => {
     let next = Number(draft);
     if (!Number.isFinite(next) || (min !== undefined && next < min)) {
       setInvalid(true);
-      setDraft(formatValue(value));
+      setDraft(value.toFixed(2).replace(/\.00$/, ""));
       window.setTimeout(() => setInvalid(false), 500);
       return;
     }
@@ -62,6 +60,7 @@ export default function SelectedNodeInspector() {
   const updateNode = useCanvas((s) => s.updateNode);
   const deleteNode = useCanvas((s) => s.deleteNode);
   const groupSelected = useCanvas((s) => s.groupSelected);
+  const autoLayoutSelected = useCanvas((s) => s.autoLayoutSelected);
   const wrapSelectedInFrame = useCanvas((s) => s.wrapSelectedInFrame);
   const ungroupSelected = useCanvas((s) => s.ungroupSelected);
   const duplicateSelected = useCanvas((s) => s.duplicateSelected);
@@ -91,6 +90,7 @@ export default function SelectedNodeInspector() {
 
   const textLike = node.type === "text" || node.type === "button" || node.type === "input" || node.type === "card" || node.type === "row" || node.type === "section" || node.type === "component";
   const isTextNode = node.type === "text";
+  const autoLayoutParent = screen ? findParentNode(screen, node.id)?.props.autoLayout : false;
 
   const set = (patch: Partial<typeof node.props>) => updateNode(node.id, patch);
   const autoDirection = node.props.direction === "col" ? "col" : "row";
@@ -134,6 +134,24 @@ export default function SelectedNodeInspector() {
           <GeometryInput label="Rotation" value={node.rotation ?? 0} wrap disabled={multi} onCommit={(value) => { setGeom(node.id, { rotation: value }); commitHistory(); }} />
         </div>
       </section>
+
+      {!multi && (
+        <section>
+          <div className="text-[10px] uppercase tracking-wide text-zinc-400 mb-1">Resizing</div>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="text-[11px] text-zinc-500">Horizontal
+              <select value={node.props.layoutSizingHorizontal ?? (isTextNode ? "hug" : "fixed")} onChange={(e) => set({ layoutSizingHorizontal: e.target.value as "fixed" | "hug" | "fill" })} className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-2 py-1.5 text-[12px]">
+                <option value="fixed">Fixed</option><option value="hug">Hug content</option><option value="fill" disabled={!autoLayoutParent}>Fill container</option>
+              </select>
+            </label>
+            <label className="text-[11px] text-zinc-500">Vertical
+              <select value={node.props.layoutSizingVertical ?? (isTextNode ? "hug" : "fixed")} onChange={(e) => set({ layoutSizingVertical: e.target.value as "fixed" | "hug" | "fill" })} className="mt-1 w-full rounded-md border border-zinc-200 bg-white px-2 py-1.5 text-[12px]">
+                <option value="fixed">Fixed</option><option value="hug">Hug content</option><option value="fill" disabled={!autoLayoutParent}>Fill container</option>
+              </select>
+            </label>
+          </div>
+        </section>
+      )}
 
       {/* Align */}
       <section>
@@ -179,6 +197,7 @@ export default function SelectedNodeInspector() {
             </label>
           )}
         </div>
+        <button type="button" onClick={autoLayoutSelected} disabled={!selIds.length} className="mb-2 w-full rounded-lg border border-violet-300 px-2 py-1.5 text-[11px] text-violet-700 hover:bg-violet-50 disabled:opacity-40">Create from selection</button>
         {isTextNode ? (
           <div className="space-y-2">
             <p className="text-[11px] leading-relaxed text-zinc-500">Wrap text in a container to add background, stroke, padding, and radius.</p>
@@ -200,12 +219,20 @@ export default function SelectedNodeInspector() {
             </label>
             <div className="grid grid-cols-2 gap-2">
               <label className="text-[11px]">
-                <span className="text-zinc-500">Pad T/B</span>
-                <input type="number" value={node.props.padV ?? node.props.pad ?? 0} onChange={(e) => set({ padV: Number(e.target.value) })} className="w-full text-[12px] border border-zinc-200 rounded-md px-2 py-1.5" />
+                <span className="text-zinc-500">Padding top</span>
+                <input type="number" value={node.props.padTop ?? node.props.padV ?? node.props.pad ?? 10} onChange={(e) => set({ padTop: Number(e.target.value) })} className="w-full text-[12px] border border-zinc-200 rounded-md px-2 py-1.5" />
               </label>
               <label className="text-[11px]">
-                <span className="text-zinc-500">Pad L/R</span>
-                <input type="number" value={node.props.padH ?? node.props.pad ?? 0} onChange={(e) => set({ padH: Number(e.target.value) })} className="w-full text-[12px] border border-zinc-200 rounded-md px-2 py-1.5" />
+                <span className="text-zinc-500">Padding right</span>
+                <input type="number" value={node.props.padRight ?? node.props.padH ?? node.props.pad ?? 10} onChange={(e) => set({ padRight: Number(e.target.value) })} className="w-full text-[12px] border border-zinc-200 rounded-md px-2 py-1.5" />
+              </label>
+              <label className="text-[11px]">
+                <span className="text-zinc-500">Padding bottom</span>
+                <input type="number" value={node.props.padBottom ?? node.props.padV ?? node.props.pad ?? 10} onChange={(e) => set({ padBottom: Number(e.target.value) })} className="w-full text-[12px] border border-zinc-200 rounded-md px-2 py-1.5" />
+              </label>
+              <label className="text-[11px]">
+                <span className="text-zinc-500">Padding left</span>
+                <input type="number" value={node.props.padLeft ?? node.props.padH ?? node.props.pad ?? 10} onChange={(e) => set({ padLeft: Number(e.target.value) })} className="w-full text-[12px] border border-zinc-200 rounded-md px-2 py-1.5" />
               </label>
             </div>
           </div>
@@ -216,13 +243,40 @@ export default function SelectedNodeInspector() {
       {textLike && (
         <section>
           <div className="text-[10px] uppercase tracking-wide text-zinc-400 mb-1">Typography</div>
-          <div className="space-y-2">
+          <div className="space-y-2.5">
             <input value={node.props.text ?? ""} onChange={(e) => set({ text: e.target.value })} placeholder="Text" className="w-full text-[12px] border border-zinc-200 rounded-md px-2 py-1.5" />
+            <select aria-label="Font family" value={node.props.fontFamily ?? "Inter"} onChange={(e) => set({ fontFamily: e.target.value })} className="h-10 w-full rounded-xl border border-zinc-200 bg-white px-3 text-[13px] font-medium outline-none focus:border-violet-400">
+              {["Inter", "Geist", "Arial", "Helvetica", "Georgia", "Times New Roman", "Courier New", "monospace"].map((font) => <option key={font} value={font}>{font}</option>)}
+            </select>
             <div className="grid grid-cols-2 gap-2">
-              <label className="text-[11px]">
-                <span className="text-zinc-500">Size</span>
-                <input type="number" value={node.props.size ?? 14} onChange={(e) => set({ size: Number(e.target.value) })} className="w-full text-[12px] border border-zinc-200 rounded-md px-2 py-1.5" />
-              </label>
+              <select aria-label="Font weight" value={node.props.weight ?? 400} onChange={(e) => set({ weight: Number(e.target.value) })} className="h-10 rounded-xl border border-zinc-200 bg-white px-3 text-[12px] outline-none">
+                <option value={100}>Thin</option><option value={200}>Extra Light</option><option value={300}>Light</option><option value={400}>Regular</option><option value={500}>Medium</option><option value={600}>Semi Bold</option><option value={700}>Bold</option><option value={800}>Extra Bold</option><option value={900}>Black</option>
+              </select>
+              <label className="flex h-10 items-center rounded-xl bg-zinc-100 px-3 text-[12px]"><span className="mr-2 text-zinc-400">Size</span><input aria-label="Font size" type="number" min={1} value={node.props.size ?? 14} onChange={(e) => set({ size: Math.max(1, Number(e.target.value)) })} className="min-w-0 flex-1 bg-transparent text-right outline-none" /></label>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="flex h-10 items-center rounded-xl bg-zinc-100 px-3 text-[12px]"><span className="mr-2 text-zinc-400">↕</span><input aria-label="Line height" type="number" min={0} placeholder="Auto" value={node.props.lineHeight ?? ""} onChange={(e) => set({ lineHeight: e.target.value === "" ? undefined : Math.max(1, Number(e.target.value)) })} className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-zinc-700" /></label>
+              <label className="flex h-10 items-center rounded-xl bg-zinc-100 px-3 text-[12px]"><span className="mr-2 text-zinc-400">|A|</span><input aria-label="Letter spacing" type="number" value={node.props.letterSpacing ?? 0} onChange={(e) => set({ letterSpacing: Number(e.target.value) })} className="min-w-0 flex-1 bg-transparent text-right outline-none" /><span className="ml-1">px</span></label>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-4 rounded-xl bg-zinc-100 p-0.5" aria-label="Text alignment">
+                {(["left", "center", "right", "justify"] as const).map((alignment) => <button key={alignment} type="button" title={`Align ${alignment}`} onClick={() => set({ textAlign: alignment })} className={`h-9 rounded-lg text-[15px] ${node.props.textAlign === alignment || (!node.props.textAlign && alignment === "left") ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500"}`}>{alignment === "left" ? "≡" : alignment === "center" ? "≣" : alignment === "right" ? "≡" : "☰"}</button>)}
+              </div>
+              <div className="grid grid-cols-3 rounded-xl bg-zinc-100 p-0.5" aria-label="Vertical text alignment">
+                {(["top", "center", "bottom"] as const).map((alignment) => <button key={alignment} type="button" title={`Align ${alignment}`} onClick={() => set({ textVerticalAlign: alignment })} className={`h-9 rounded-lg text-[16px] ${node.props.textVerticalAlign === alignment || (!node.props.textVerticalAlign && alignment === "top") ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500"}`}>{alignment === "top" ? "↥" : alignment === "center" ? "↕" : "↧"}</button>)}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-[10px] text-zinc-500">Decoration<select value={node.props.textDecoration ?? "none"} onChange={(e) => set({ textDecoration: e.target.value as "none" | "underline" | "line-through" })} className="mt-1 h-9 w-full rounded-lg border border-zinc-200 bg-white px-2 text-[12px]"><option value="none">None</option><option value="underline">Underline</option><option value="line-through">Strikethrough</option></select></label>
+              <label className="text-[10px] text-zinc-500">Case<select value={node.props.textCase ?? "original"} onChange={(e) => set({ textCase: e.target.value as "original" | "upper" | "lower" | "title" })} className="mt-1 h-9 w-full rounded-lg border border-zinc-200 bg-white px-2 text-[12px]"><option value="original">Original</option><option value="upper">UPPERCASE</option><option value="lower">lowercase</option><option value="title">Title Case</option></select></label>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-[10px] text-zinc-500">List style<select value={node.props.listStyle ?? "none"} onChange={(e) => set({ listStyle: e.target.value as "none" | "bulleted" | "numbered" })} className="mt-1 h-9 w-full rounded-lg border border-zinc-200 bg-white px-2 text-[12px]"><option value="none">None</option><option value="bulleted">• Bulleted</option><option value="numbered">1. Numbered</option></select></label>
+              <label className="text-[10px] text-zinc-500">Paragraph spacing<input aria-label="Paragraph spacing" type="number" min={0} value={node.props.paragraphSpacing ?? 0} onChange={(e) => set({ paragraphSpacing: Math.max(0, Number(e.target.value)) })} className="mt-1 h-9 w-full rounded-lg border border-zinc-200 px-2 text-[12px]" /></label>
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-[11px] text-zinc-600">
+              <label className="flex items-center justify-between rounded-lg bg-zinc-100 px-2 py-2">Vertical trim<input type="checkbox" checked={!!node.props.verticalTrim} onChange={(e) => set({ verticalTrim: e.target.checked })} className="accent-violet-600" /></label>
+              <label className="flex items-center justify-between rounded-lg bg-zinc-100 px-2 py-2">Truncate<input type="checkbox" checked={!!node.props.truncateText} onChange={(e) => set({ truncateText: e.target.checked })} className="accent-violet-600" /></label>
             </div>
             <div className="flex items-center gap-2">
               <input type="color" value={node.props.color ?? "#18181b"} onChange={(e) => set({ color: e.target.value })} className="w-8 h-8 rounded border border-zinc-200 bg-transparent cursor-pointer" />

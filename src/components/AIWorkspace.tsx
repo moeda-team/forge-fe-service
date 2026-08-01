@@ -4,13 +4,21 @@ import { useStore, STAGES } from "@/lib/store";
 import RequirementPanel from "./RequirementPanel";
 
 const MODELS = [
-  { id: "gpt-4o", label: "GPT-4o", hint: "OpenAI" },
-  { id: "claude-3.5-sonnet", label: "Claude 3.5 Sonnet", hint: "Anthropic" },
-  { id: "claude-3-opus", label: "Claude 3 Opus", hint: "Anthropic" },
-  { id: "gemini-1.5-pro", label: "Gemini 1.5 Pro", hint: "Google" },
-  { id: "gpt-4o-mini", label: "GPT-4o mini", hint: "OpenAI" },
-  { id: "llama-3.1-70b", label: "Llama 3.1 70B", hint: "Meta" },
+  { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite", hint: "Google" },
+  { id: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite", hint: "Google · Recommended" },
+  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash", hint: "Google" },
+  { id: "gemini-3.6-flash", label: "Gemini 3.6 Flash", hint: "Google" },
 ];
+
+type LLMSettings = {
+  provider: string;
+  modelName: string;
+};
+
+const DEFAULT_LLM_SETTINGS: LLMSettings = {
+  provider: "Google",
+  modelName: "gemini-3.5-flash-lite",
+};
 
 type AttachKind = "file" | "folder" | "knowledge";
 const ATTACH_ORDER: AttachKind[] = ["knowledge", "folder", "file"];
@@ -30,13 +38,16 @@ export default function AIWorkspace() {
   const sendChat = useStore((s) => s.sendChat);
   const setView = useStore((s) => s.setView);
 
-  const [model, setModel] = useState("claude-3.5-sonnet");
+  const [model, setModel] = useState("gemini-3.5-flash-lite");
   const [modelOpen, setModelOpen] = useState(false);
   const [modelQ, setModelQ] = useState("");
   const [attach, setAttach] = useState<Record<AttachKind, number>>({ file: 0, folder: 0, knowledge: 0 });
   const [menuOpen, setMenuOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [dragFiles, setDragFiles] = useState(0);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [llmSettings, setLlmSettings] = useState<LLMSettings>(DEFAULT_LLM_SETTINGS);
+  const [sending, setSending] = useState(false);
 
   const taRef = useRef<HTMLTextAreaElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -56,13 +67,28 @@ export default function AIWorkspace() {
   // focus search when model dropdown opens
   useEffect(() => { if (modelOpen) setTimeout(() => searchRef.current?.focus(), 30); }, [modelOpen]);
 
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem("forge:llm-settings");
+      const metadata = saved ? JSON.parse(saved) as Partial<LLMSettings> : {};
+      if (metadata.modelName === "gemini-2.5-flash-lite") metadata.modelName = DEFAULT_LLM_SETTINGS.modelName;
+      setLlmSettings({ ...DEFAULT_LLM_SETTINGS, ...metadata });
+      if (metadata.modelName) setModel(metadata.modelName);
+    } catch {
+      // Invalid local data falls back to the built-in model configuration.
+    }
+  }, []);
+
   if (!p) return null;
   const log = aiLog || [{ role: "ai" as const, text: `Requirement is live for ${p.name}. Ask me to draft the brief, generate the PRD, or run an impact analysis.` }];
-  const activeModel = MODELS.find((m) => m.id === model)!;
+  const availableModels = llmSettings.modelName && !MODELS.some((item) => item.id === llmSettings.modelName)
+    ? [{ id: llmSettings.modelName, label: llmSettings.modelName, hint: llmSettings.provider || "Custom" }, ...MODELS]
+    : MODELS;
+  const activeModel = availableModels.find((m) => m.id === model) || MODELS[1];
   const attachCount = attach.file + attach.folder + attach.knowledge;
 
   const toggleAttach = (k: AttachKind) =>
-    setAttach((a) => ({ ...a, [k]: a[k] > 0 ? 0 : 1 }));
+    setAttach((a) => ({ ...a, [k]: a[k] > 0 ? 0 : Math.floor(Math.random() * 3) + 1 }));
 
   const autoGrow = () => {
     const ta = taRef.current; if (!ta) return;
@@ -70,18 +96,28 @@ export default function AIWorkspace() {
     ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
   };
 
-  const submit = () => {
+  const submit = async () => {
     const ta = taRef.current; if (!ta) return;
     const v = ta.value.trim();
     if (!v) return;
     const parts: string[] = [];
-    if (attachCount > 0) parts.push(`[simulated context: ${attachCount} item(s) — ${Object.entries(attach).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`).join(", ")}]`);
-    sendChat((parts.join(" ") + " " + v).trim());
+    if (attachCount > 0) parts.push(`[attached: ${attachCount} item(s) — ${Object.entries(attach).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`).join(", ")}]`);
+    setSending(true);
+    try {
+      await sendChat((parts.join(" ") + " " + v).trim(), model, attach);
+    } catch {
+      // The store appends a visible error response to the conversation.
+    } finally {
+      setSending(false);
+    }
     ta.value = ""; autoGrow();
   };
 
-  const sendQuickAction = (prompt: string) => {
-    sendChat(prompt);
+  const sendQuickAction = async (prompt: string) => {
+    setSending(true);
+    try { await sendChat(prompt, model); }
+    catch { /* Error is shown in chat. */ }
+    finally { setSending(false); }
   };
 
   const focusRequirement = () => {
@@ -101,7 +137,21 @@ export default function AIWorkspace() {
     setDragFiles(0);
   };
 
-  const filtered = MODELS.filter((m) => (m.label + m.hint).toLowerCase().includes(modelQ.toLowerCase()));
+  const filtered = availableModels.filter((m) => (m.label + m.hint).toLowerCase().includes(modelQ.toLowerCase()));
+
+  const saveLlmSettings = (next: LLMSettings) => {
+    const clean = {
+      provider: next.provider.trim(),
+      modelName: next.modelName.trim(),
+    };
+    setLlmSettings(clean);
+    window.localStorage.setItem("forge:llm-settings", JSON.stringify({
+      provider: clean.provider,
+      modelName: clean.modelName,
+    }));
+    setModel(clean.modelName);
+    setSettingsOpen(false);
+  };
 
   return (
     <div className="flex-1 flex min-h-0">
@@ -198,6 +248,20 @@ export default function AIWorkspace() {
                 className="flex-1 outline-none text-sm bg-transparent px-1 py-1.5 resize-none leading-relaxed max-h-40"
               />
 
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(true)}
+                className="relative grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-zinc-300 text-zinc-600 transition hover:border-zinc-900 hover:bg-zinc-100 hover:text-zinc-900"
+                aria-label="AI settings"
+                title="AI settings"
+              >
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21H9.6v-.1A1.7 1.7 0 0 0 8.5 19.3a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3V9.6h.1A1.7 1.7 0 0 0 4.7 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.5 4.7a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.12.4.34.75.66 1 .3.25.68.4 1.08.4H21v4h-.1A1.7 1.7 0 0 0 19.4 15Z" />
+                </svg>
+                <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-emerald-500 ring-2 ring-white" />
+              </button>
+
               {/* model searchable dropdown */}
               <div className="relative" ref={modelRef}>
                 <button
@@ -246,14 +310,13 @@ export default function AIWorkspace() {
               <button
                 type="button"
                 onClick={submit}
+                disabled={sending}
                 className="bg-zinc-900 text-white rounded-xl px-4 py-2 text-sm font-medium flex items-center gap-2 hover:bg-black hover:scale-[1.03] active:scale-95 transition-transform duration-150"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>
-                Send
+                {sending ? "Thinking…" : "Send"}
               </button>
             </div>
-
-            <p className="mt-2 px-1 text-[10px] text-zinc-400">Demo mode: model selection and attachments are local UI state; no provider or files are sent.</p>
 
             {/* drag overlay */}
             {dragging && (
@@ -278,15 +341,83 @@ export default function AIWorkspace() {
       </div>
 
       <RequirementPanel p={p} onOpenKanban={() => setView("kanban")} />
+      {settingsOpen && (
+        <LLMSettingsDialog
+          value={llmSettings}
+          onClose={() => setSettingsOpen(false)}
+          onSave={saveLlmSettings}
+        />
+      )}
     </div>
+  );
+}
+
+function LLMSettingsDialog({ value, onClose, onSave }: { value: LLMSettings; onClose: () => void; onSave: (value: LLMSettings) => void }) {
+  const [draft, setDraft] = useState(value);
+  const valid = Boolean(draft.provider.trim() && draft.modelName.trim());
+
+  return (
+    <div className="fixed inset-0 z-[100] grid place-items-center bg-black/35 p-5 backdrop-blur-[2px]" onMouseDown={onClose}>
+      <div className="w-full max-w-md overflow-hidden rounded-2xl border border-zinc-300 bg-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="llm-settings-title">
+        <div className="flex items-start border-b border-zinc-200 px-5 py-4">
+          <div>
+            <h2 id="llm-settings-title" className="text-base font-semibold text-zinc-900">AI model settings</h2>
+            <p className="mt-1 text-[12px] text-zinc-500">Connect the LLM used by this workspace.</p>
+          </div>
+          <button type="button" onClick={onClose} className="ml-auto grid h-8 w-8 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-100 hover:text-zinc-900" aria-label="Close settings">×</button>
+        </div>
+
+        <div className="space-y-4 px-5 py-5">
+          <SettingsField label="Provider">
+            <input
+              value={draft.provider}
+              onChange={(event) => setDraft((current) => ({ ...current, provider: event.target.value }))}
+              placeholder="Google"
+              className="w-full rounded-xl border border-zinc-300 px-3.5 py-2.5 text-sm outline-none focus:border-zinc-900 focus:ring-1 focus:ring-zinc-900"
+            />
+          </SettingsField>
+          <SettingsField label="Model name">
+            <input
+              value={draft.modelName}
+              onChange={(event) => setDraft((current) => ({ ...current, modelName: event.target.value }))}
+              placeholder="e.g. gemini-3.5-flash-lite"
+              className="w-full rounded-xl border border-zinc-300 px-3.5 py-2.5 text-sm outline-none focus:border-zinc-900 focus:ring-1 focus:ring-zinc-900"
+            />
+          </SettingsField>
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-3 text-[11px] leading-5 text-emerald-800">
+            Gemini tersambung melalui Forge Backend. API key dikelola sebagai secret di server/Vercel dan tidak pernah disimpan atau dikirim ke browser.
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-zinc-200 bg-zinc-50 px-5 py-4">
+          <button type="button" onClick={onClose} className="rounded-xl border border-zinc-300 bg-white px-4 py-2 text-sm font-medium text-zinc-700 hover:border-zinc-900">Cancel</button>
+          <button type="button" disabled={!valid} onClick={() => onSave(draft)} className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-black disabled:cursor-not-allowed disabled:opacity-40">Save settings</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsField({ label, optional, children }: { label: string; optional?: boolean; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 flex items-center text-[12px] font-medium text-zinc-700">
+        {label}
+        {optional && <span className="ml-auto font-normal text-zinc-400">Optional</span>}
+      </span>
+      {children}
+    </label>
   );
 }
 
 type ChatEntry = { role: "ai" | "user"; text: string; at?: number };
 
 function MessageTime({ at }: { at?: number }) {
-  if (!at) return null;
-  return <span suppressHydrationWarning className="text-[10px] font-normal text-zinc-400">{new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>;
+  const [label, setLabel] = useState("");
+  useEffect(() => {
+    if (at) setLabel(new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+  }, [at]);
+  return label ? <span className="text-[10px] font-normal text-zinc-400">{label}</span> : null;
 }
 
 function ChatMessage({

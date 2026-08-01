@@ -1,10 +1,7 @@
 import { PHASE_DEVELOPMENT_SERVER } from "next/constants.js";
-import { fileURLToPath } from "node:url";
 
 /** @type {import('next').NextConfig} */
-const sharedConfig = {
-  outputFileTracingRoot: fileURLToPath(new URL("./", import.meta.url)),
-};
+const sharedConfig = {};
 
 export default function nextConfig(phase) {
   return {
