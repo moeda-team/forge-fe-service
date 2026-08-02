@@ -8,6 +8,7 @@ import InspectorPanel from "./InspectorPanel";
 import SelectedNodeInspector from "./SelectedNodeInspector";
 import EditableText from "./EditableText";
 import { formatCanvasText } from "@/lib/canvasLayout";
+import { forgeApi } from "@/lib/api";
 
 type ToolKey = "move" | "hand" | "text" | "rect" | "ellipse" | "frame";
 type FramePresetKey = "desktop" | "tablet" | "mobile";
@@ -176,6 +177,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const deleteCanvasScreen = useCanvas((s) => s.deleteScreen);
   const currentProjectId = useStore((s) => s.currentId);
   const apiEnabled = useStore((s) => s.apiEnabled);
+  const apiError = useStore((s) => s.apiError);
   const activeToolLabel = TOOLBAR_ITEMS.find((tool) => tool.key === activeTool)?.label ?? "Move";
 
   const createNewScreen = () => {
@@ -267,6 +269,37 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
       if (completionTimer) window.clearTimeout(completionTimer);
     };
   }, [apiEnabled, currentProjectId]);
+
+  useEffect(() => {
+    if (remoteCanvasLoading || !apiEnabled || !currentProjectId) return;
+    const inlineNodes: CNode[] = [];
+    const collect = (nodes: CNode[]) => nodes.forEach((node) => {
+      if (node.type === "image" && !node.props.assetId && /^(data:image\/|blob:)/i.test(node.props.src || "")) inlineNodes.push(node);
+      if (node.children) collect(node.children);
+    });
+    collect(screen.nodes);
+    if (!inlineNodes.length) return;
+    let cancelled = false;
+    void (async () => {
+      let migrated = 0;
+      for (const node of inlineNodes) {
+        try {
+          const response = await fetch(node.props.src!);
+          const blob = await response.blob();
+          const asset = await forgeApi.uploadAsset(currentProjectId, blob, node.props.text || node.name || "legacy-image");
+          if (cancelled) return;
+          node.props.assetId = asset.id;
+          node.props.assetKey = asset.objectKey;
+          node.props.src = asset.url;
+          migrated += 1;
+        } catch (error) {
+          useStore.setState({ apiError: error instanceof Error ? `Legacy asset migration failed: ${error.message}` : "Legacy asset migration failed" });
+        }
+      }
+      if (migrated && !cancelled) useCanvas.getState().pushHistory("UPDATE_FRAME", inlineNodes.map((node) => node.id));
+    })();
+    return () => { cancelled = true; };
+  }, [apiEnabled, currentProjectId, remoteCanvasLoading, screen]);
 
   const selectTool = useCallback((tool: ToolKey) => {
     setActiveTool(tool);
@@ -525,7 +558,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     if (!(e.ctrlKey || e.metaKey)) clearSel();
   };
 
-  const insertImageSource = useCallback((src: string, name: string, point: { x: number; y: number }, index = 0) => {
+  const insertImageSource = useCallback((src: string, name: string, point: { x: number; y: number }, index = 0, asset?: { id: string; objectKey: string }) => {
     const commit = (naturalWidth = 320, naturalHeight = 240) => {
       const maxWidth = 480;
       const maxHeight = 360;
@@ -537,7 +570,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
       const offset = index * 24;
       addNode("image", { x: point.x + offset, y: point.y + offset, w, h });
       const id = useCanvas.getState().canvas.selIds[0];
-      if (id) updateNode(id, { src, text: name, objectFit: "cover", imageScale: 1 });
+      if (id) updateNode(id, { src, assetId: asset?.id, assetKey: asset?.objectKey, text: name, objectFit: "cover", imageScale: 1 });
       setActiveTool("move");
     };
     const probe = new window.Image();
@@ -547,7 +580,17 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   }, [addNode, setActiveTool, updateNode]);
 
   const readImageFile = useCallback((file: File, point: { x: number; y: number }, index = 0) => {
-    const insertBlob = (blob: Blob) => {
+    const insertBlob = async (blob: Blob) => {
+      if (apiEnabled && currentProjectId) {
+        try {
+          const asset = await forgeApi.uploadAsset(currentProjectId, blob, file.name || "image");
+          insertImageSource(asset.url, file.name || "Image", point, index, asset);
+          return;
+        } catch (error) {
+          useStore.setState({ apiError: error instanceof Error ? error.message : "Unable to upload image asset" });
+          return;
+        }
+      }
       const reader = new FileReader();
       reader.onload = () => {
         if (typeof reader.result === "string") insertImageSource(reader.result, file.name || "Image", point, index);
@@ -570,9 +613,9 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
       canvas.height = Math.max(1, Math.round(bitmap.height * scale));
       canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
       bitmap.close();
-      canvas.toBlob((blob) => insertBlob(blob || file), "image/webp", 0.82);
+      canvas.toBlob((blob) => void insertBlob(blob || file), "image/webp", 0.82);
     }).catch(() => insertBlob(file));
-  }, [insertImageSource]);
+  }, [apiEnabled, currentProjectId, insertImageSource]);
 
   const onCanvasDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -1028,7 +1071,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
           <button onClick={renameCurrentScreen} title="Rename screen" className="w-7 h-7 rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900">✎</button>
           <button onClick={duplicateCurrentScreen} title="Duplicate screen" className="w-7 h-7 rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900">⧉</button>
           <button onClick={removeCurrentScreen} disabled={availableScreens.length <= 1} title="Delete screen" className="w-7 h-7 rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-red-600 disabled:opacity-30 disabled:hover:bg-transparent">×</button>
-          <span className={`ml-2 min-w-14 text-[10px] ${saveStatus === "error" ? "text-red-600" : "text-zinc-400"}`}>
+          <span title={saveStatus === "error" ? apiError || "Canvas save failed" : undefined} className={`ml-2 min-w-14 text-[10px] ${saveStatus === "error" ? "cursor-help text-red-600 underline decoration-dotted" : "text-zinc-400"}`}>
             {saveStatus === "saving" ? "Saving…" : saveStatus === "error" ? "Save failed" : saveStatus === "saved" ? "Saved" : ""}
           </span>
         </div>

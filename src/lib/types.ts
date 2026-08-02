@@ -144,6 +144,8 @@ export interface CNode {
     pad?: number;
     placeholder?: string;
     src?: string;
+    assetId?: string;
+    assetKey?: string;
     objectFit?: string;
     imageScale?: number;
     shapeKind?: string;

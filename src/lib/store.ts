@@ -963,6 +963,7 @@ const canvasSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const canvasSaveQueues = new Map<string, Promise<void>>();
 const canvasDesiredRevisions = new Map<string, number>();
 const lastRemoteHistoryId = new Map<string, string>();
+const lastSavedCanvasRoots = new Map<string, Map<string, string>>();
 
 type CompactCanvasSnapshot = {
   version: 2;
@@ -1030,6 +1031,17 @@ function syncCanvasToScreen(screen: Screen | undefined, canvas: CanvasStore["can
     zoom: canvas.zoom,
     pan: canvas.pan,
   };
+}
+
+function serializableCanvasNodes(nodes: CNode[]): CNode[] {
+  const clone = JSON.parse(JSON.stringify(nodes)) as CNode[];
+  const visit = (items: CNode[]) => items.forEach((node) => {
+    if (node.props.assetId) delete node.props.src;
+    if (node.props.src?.startsWith("blob:")) delete node.props.src;
+    if (node.children) visit(node.children);
+  });
+  visit(clone);
+  return clone;
 }
 
 function canvasForScreen(canvas: CanvasStore["canvas"], screen: Screen, history: HistoryEntry[] = []) {
@@ -1139,6 +1151,7 @@ async function loadRemoteCanvasOnce(projectId: string) {
     revision: document.revision ?? screen.revision ?? 0,
     history,
   }));
+  remoteScreens.forEach((screen) => lastSavedCanvasRoots.set(screen.id!, new Map(screen.nodes.map((node) => [node.id, JSON.stringify(serializableCanvasNodes([node])[0])]))));
   reportRemoteCanvasProgress(projectId, 90);
 
   const project = useStore.getState().projects.find((item) => item.id === projectId);
@@ -1189,8 +1202,13 @@ function scheduleRemoteCanvasSave() {
     if (latestState.canvas.screen === latestScreen.name) syncCanvasToScreen(latestScreen, latestState.canvas);
     const history = latestScreen.history || latestState.canvas.history;
     const latestHistory = history.length ? history[history.length - 1] : undefined;
-    const includeHistory = latestHistory && lastRemoteHistoryId.get(latestScreen.id!) !== latestHistory.id;
-    const revision = Math.max(latestScreen.revision || 0, canvasDesiredRevisions.get(latestScreen.id!) || 0) + 1;
+    const pendingHistory = latestHistory && lastRemoteHistoryId.get(latestScreen.id!) !== latestHistory.id
+      ? { action: latestHistory.action, payload: latestHistory.payload, inverse: latestHistory.inverse, affectedIds: latestHistory.affectedIds }
+      : undefined;
+    // History contains two full snapshots. Avoid sending large inline images
+    // three times in a single autosave request.
+    const includeHistory = pendingHistory && JSON.stringify(pendingHistory).length <= 512_000;
+    let revision = Math.max(latestScreen.revision || 0, canvasDesiredRevisions.get(latestScreen.id!) || 0) + 1;
     latestScreen.revision = revision;
     canvasDesiredRevisions.set(latestScreen.id!, revision);
     const document = {
@@ -1198,16 +1216,43 @@ function scheduleRemoteCanvasSave() {
       name: latestScreen.name,
       w: Math.round(latestScreen.w),
       h: Math.round(latestScreen.h),
-      nodes: JSON.parse(JSON.stringify(latestScreen.nodes)) as CNode[],
+      nodes: serializableCanvasNodes(latestScreen.nodes),
       guides: JSON.parse(JSON.stringify(latestScreen.guides || [])) as Guide[],
       settings: { ...resolvedSettings(latestScreen.settings) },
-      ...(includeHistory ? { history: { action: latestHistory.action, payload: latestHistory.payload, inverse: latestHistory.inverse, affectedIds: latestHistory.affectedIds } } : {}),
+      ...(includeHistory ? { history: pendingHistory } : {}),
     };
+    const savedRoots = lastSavedCanvasRoots.get(latestScreen.id!) || new Map<string, string>();
+    const currentRoots = new Map(document.nodes.map((node) => [node.id, JSON.stringify(node)]));
+    const addedNodes = document.nodes.filter((node) => !savedRoots.has(node.id));
+    const updatedNodes = document.nodes.filter((node) => savedRoots.has(node.id) && savedRoots.get(node.id) !== currentRoots.get(node.id));
+    const deletedIds = Array.from(savedRoots.keys()).filter((id) => !currentRoots.has(id));
+    const patchDocument = { ...document, addedNodes, updatedNodes, deletedIds };
+    delete (patchDocument as Partial<typeof patchDocument>).nodes;
     const previous = canvasSaveQueues.get(latestScreen.id!) || Promise.resolve();
     const job = previous.catch(() => undefined).then(async () => {
-      const saved = await forgeApi.saveScreenDocument(latestScreen.id!, document);
-      if (saved.stale) throw new Error("Canvas changed in another session. Reload before saving again.");
-      if (includeHistory) lastRemoteHistoryId.set(latestScreen.id!, latestHistory.id);
+      let saved;
+      try {
+        saved = await forgeApi.patchScreenDocument(latestScreen.id!, patchDocument);
+        if (saved.stale) {
+          revision = saved.revision + 1;
+          document.revision = revision;
+          latestScreen.revision = revision;
+          canvasDesiredRevisions.set(latestScreen.id!, revision);
+          patchDocument.revision = revision;
+          saved = await forgeApi.patchScreenDocument(latestScreen.id!, patchDocument);
+        }
+      } catch (error) {
+        if (!(error instanceof ApiError) || (error.status !== 404 && error.status !== 405)) throw error;
+        await Promise.all([
+          forgeApi.saveScreenNodes(latestScreen.id!, document.nodes),
+          forgeApi.saveScreenGuides(latestScreen.id!, document.guides),
+          forgeApi.updateScreen(latestScreen.id!, { name: document.name, w: document.w, h: document.h, settings: document.settings }),
+        ]);
+        saved = { revision, stale: false };
+      }
+      if (saved.stale) throw new Error("Canvas changed in another session and could not be synchronized.");
+      lastSavedCanvasRoots.set(latestScreen.id!, currentRoots);
+      if (includeHistory && latestHistory) lastRemoteHistoryId.set(latestScreen.id!, latestHistory.id);
       latestScreen.revision = Math.max(latestScreen.revision || 0, saved.revision);
       if (canvasDesiredRevisions.get(latestScreen.id!) === revision) useCanvas.setState({ saveStatus: "saved" });
     }).catch((error) => {

@@ -64,6 +64,25 @@ export const forgeApi = {
   createProject: (name: string, desc: string) => request<ApiProject>("/api/projects", {
     method: "POST", body: JSON.stringify({ name, desc, type: "Project" }),
   }),
+  async uploadAsset(projectId: string, file: Blob, name = "asset") {
+    if (!API_URL) throw new ApiError(0, "API_DISABLED", "Backend API URL is not configured");
+    const token = getAccessToken();
+    const response = await fetch(`${API_URL}/api/projects/${projectId}/assets`, {
+      method: "POST",
+      body: file,
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-File-Name": encodeURIComponent(name),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+    const payload = await response.json().catch(() => null) as (ApiAsset & { url: string }) | { error?: { code?: string; message?: string } } | null;
+    if (!response.ok) {
+      const failure = payload as { error?: { code?: string; message?: string } } | null;
+      throw new ApiError(response.status, failure?.error?.code || "ASSET_UPLOAD_FAILED", failure?.error?.message || "Asset upload failed");
+    }
+    return payload as ApiAsset & { url: string };
+  },
   getChatHistory: (projectId: string, limit = 100, cursor?: string) =>
     request<ApiChatHistory>(`/api/ai/chat/${projectId}?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
   getRequirementHistory: (projectId: string) =>
@@ -93,6 +112,14 @@ export const forgeApi = {
     history?: Pick<HistoryEntry, "action" | "payload" | "inverse" | "affectedIds">;
   }) => request<{ id: string; name: string; w: number; h: number; revision: number; stale: boolean; updatedAt: string }>(`/api/screens/${screenId}/document`, {
     method: "PUT", body: JSON.stringify(input),
+  }),
+  patchScreenDocument: (screenId: string, input: {
+    revision: number; name: string; w: number; h: number;
+    addedNodes: CNode[]; updatedNodes: CNode[]; deletedIds: string[];
+    guides: Guide[]; settings: Partial<ScreenSettings>;
+    history?: Pick<HistoryEntry, "action" | "payload" | "inverse" | "affectedIds">;
+  }) => request<{ id: string; name: string; w: number; h: number; revision: number; stale: boolean; updatedAt: string }>(`/api/screens/${screenId}/document`, {
+    method: "PATCH", body: JSON.stringify(input),
   }),
   saveScreenNodes: (screenId: string, nodes: CNode[]) => request(`/api/screens/${screenId}/nodes`, {
     method: "PUT", body: JSON.stringify({ nodes }),
@@ -125,6 +152,7 @@ export const forgeApi = {
 };
 
 export type ApiScreen = { id: string; name: string; w: number; h: number; revision: number; settings?: Partial<ScreenSettings> };
+export type ApiAsset = { id: string; projectId: string; objectKey: string; hash: string; mimeType: string; size: number; originalName?: string | null };
 type ApiHistoryEntry = { id: string; action: HistoryEntry["action"]; payload: unknown; inverse: unknown; affectedIds: string[]; createdAt: string };
 export type KanbanSyncResult = { added: number; updated: number; obsolete: number; version: number };
 

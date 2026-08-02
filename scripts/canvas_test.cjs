@@ -485,6 +485,20 @@ assert.match(kanbanSource, /Overall progress/, "Kanban exposes overall completio
 assert.match(kanbanSource, /style=\{\{ width: `\$\{progress\}%` \}\}/, "Kanban task cards render status progress bars");
 assert.match(kanbanSource, /kanban-scan-line/, "In-progress task previews render the moving scanner animation");
 const globalStylesSource = fs.readFileSync(path.join(process.cwd(), "src/app/globals.css"), "utf8");
+const frontendFlowSource = fs.readFileSync(path.join(process.cwd(), "src/components/FrontendApplicationFlow.tsx"), "utf8");
+assert.match(frontendFlowSource, /Authentication Flow/, "Frontend Canvas includes the authentication application flow");
+assert.match(frontendFlowSource, /POST \/api\/auth\/login/, "Login request stays consistent across the flow");
+assert.match(frontendFlowSource, /GET \/api\/dashboard/, "Dashboard request is represented in the flow");
+assert.match(frontendFlowSource, /Login error copy uses fallback text/, "Flow exposes the required copy warning");
+assert.match(frontendFlowSource, /Generated states: 9/, "Flow summary reports complete dummy state coverage");
+assert.match(frontendFlowSource, /scope === "page"/, "Flow Page scope has contextual navigation");
+assert.match(frontendFlowSource, /scope === "data"/, "Flow Data scope has contextual navigation");
+const artifactCanvasSource = fs.readFileSync(path.join(process.cwd(), "src/components/ArtifactCanvas.tsx"), "utf8");
+assert.match(artifactCanvasSource, /setFlowScope\(scope\)/, "Left panel and toolbar share the same flow scope state");
+assert.match(artifactCanvasSource, /mode === "inspect"[\s\S]*?\["pages", "data", "components"\]/, "Inspect mode exposes only Pages, Data, and Components");
+assert.match(artifactCanvasSource, /page === "login"[\s\S]*?LoginPagePreview/, "Login selection renders the login page preview");
+assert.match(artifactCanvasSource, /rizal@forge\.app/, "Login preview uses the synchronized authentication dummy data");
+assert.match(artifactCanvasSource, /selectedPage === pageId/, "Page navigation is controlled by dedicated page selection state");
 assert.match(globalStylesSource, /@keyframes kanban-scan[\s\S]*?translateY\(310%\)/, "Kanban scanner sweeps vertically across the preview");
 assert.doesNotMatch(canvasSource, /selected\s*\?\s*["'`][^"'`]*\bz-\d+/, "Selection does not assign a foreground z-index to the selected object");
 assert.match(canvasSource, /whiteSpace:\s*n\.type\s*===\s*["']text["']\s*\?\s*["']pre["']/, "Text remains unwrapped after its editing state closes");
@@ -494,7 +508,9 @@ assert.equal(latestSnapshot.version, 2, "Canvas history uses the compact snapsho
 assert.ok(latestSnapshot.screen, "Compact history stores only the active screen");
 assert.equal(latestSnapshot.screens, undefined, "Canvas history never embeds every screen");
 assert.equal(latestSnapshot.screen.history, undefined, "A history snapshot never recursively embeds older history");
-assert.match(source, /forgeApi\.saveScreenDocument/, "Canvas persistence uses the atomic document endpoint");
+assert.match(source, /forgeApi\.patchScreenDocument/, "Canvas persistence uses the incremental document endpoint");
+assert.match(source, /serializableCanvasNodes/, "Canvas persistence strips transient asset URLs");
+assert.match(source, /addedNodes, updatedNodes, deletedIds/, "Canvas autosave sends node deltas");
 assert.doesNotMatch(source, /JSON\.stringify\(\{\s*screens:\s*SCREENS/, "Canvas snapshots cannot recursively serialize screen history");
 
 console.log("canvas smoke test passed");

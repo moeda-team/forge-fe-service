@@ -89,7 +89,7 @@ export default function Home() {
 
   return (
     <div className="h-screen flex bg-zinc-50 text-zinc-900">
-      {view !== "projects" && view !== "design" && <Sidebar />}
+      {view !== "projects" && view !== "design" && !(view === "artifact" && artifactKind === "frontend") && <Sidebar />}
       {view === "projects" && <ProjectView />}
       {view === "ai" && <AIWorkspace />}
       {view === "kanban" && <Kanban />}
