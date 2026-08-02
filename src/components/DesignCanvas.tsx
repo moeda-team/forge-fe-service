@@ -1,5 +1,6 @@
 "use client";
 import { useState, useRef, useEffect, useCallback } from "react";
+import { flushSync } from "react-dom";
 import { useCanvas, getScreen, findNodeById, findParentNode, getAutoLayoutDropPreview, SCREENS, useStore, loadRemoteCanvas } from "@/lib/store";
 import type { CNode } from "@/lib/types";
 import LayersPanel from "./LayersPanel";
@@ -120,6 +121,15 @@ function OverflowBtn({ label, icon, items }: { label: string; icon: React.ReactN
   );
 }
 
+function ContextMenuButton({ label, shortcut, disabled = false, onClick }: { label: string; shortcut?: string; disabled?: boolean; onClick: () => void }) {
+  return (
+    <button type="button" role="menuitem" disabled={disabled} onClick={onClick} className="flex w-full items-center rounded-lg px-3 py-2 text-left text-[13px] hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent">
+      <span className="flex-1">{label}</span>
+      {shortcut && <span className="ml-4 text-[11px] text-zinc-400">{shortcut}</span>}
+    </button>
+  );
+}
+
 export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const canvas = useCanvas((s) => s.canvas);
   const setPan = useCanvas((s) => s.setPan);
@@ -140,6 +150,8 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const toggleRulers = useCanvas((s) => s.toggleRulers);
   const toggleMinimap = useCanvas((s) => s.toggleMinimap);
   const autoLayoutSelected = useCanvas((s) => s.autoLayoutSelected);
+  const groupSelected = useCanvas((s) => s.groupSelected);
+  const ungroupSelected = useCanvas((s) => s.ungroupSelected);
   const selectAllEligible = useCanvas((s) => s.selectAllEligible);
   const copySelected = useCanvas((s) => s.copySelected);
   const cutSelected = useCanvas((s) => s.cutSelected);
@@ -152,6 +164,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const updateGuide = useCanvas((s) => s.updateGuide);
   const deleteGuide = useCanvas((s) => s.deleteGuide);
   const toggleNodeLock = useCanvas((s) => s.toggleNodeLock);
+  const reorderNode = useCanvas((s) => s.reorderNode);
   const undo = useCanvas((s) => s.undo);
   const redo = useCanvas((s) => s.redo);
   const activeTool = useCanvas((s) => s.activeTool);
@@ -216,16 +229,28 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   useEffect(() => {
     if (!apiEnabled || !currentProjectId) { setRemoteCanvasLoading(false); return; }
     let cancelled = false;
+    let completionTimer: number | undefined;
     setRemoteCanvasLoading(true);
     setRemoteCanvasProgress(0);
     void loadRemoteCanvas(currentProjectId, (progress) => {
       if (!cancelled) setRemoteCanvasProgress(progress);
     })
-      .catch((error) => {
-        useStore.setState({ apiError: error instanceof Error ? error.message : "Unable to load the design canvas" });
+      .then(() => {
+        if (cancelled) return;
+        setRemoteCanvasProgress(100);
+        completionTimer = window.setTimeout(() => {
+          if (!cancelled) setRemoteCanvasLoading(false);
+        }, 450);
       })
-      .finally(() => { if (!cancelled) setRemoteCanvasLoading(false); });
-    return () => { cancelled = true; };
+      .catch((error) => {
+        if (cancelled) return;
+        useStore.setState({ apiError: error instanceof Error ? error.message : "Unable to load the design canvas" });
+        setRemoteCanvasLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      if (completionTimer) window.clearTimeout(completionTimer);
+    };
   }, [apiEnabled, currentProjectId]);
 
   const selectTool = useCallback((tool: ToolKey) => {
@@ -727,6 +752,22 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   }, [editingId]);
 
   useEffect(() => {
+    if (!editingId) return;
+    const finishTextFromOutsideClick = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('[data-canvas-text-editor="true"]')) return;
+      const activeText = findNodeById(screen, editingId);
+      if (activeText) updateNode(editingId, { text: activeText.props.text ?? "" });
+      flushSync(() => {
+        setEditingId(null);
+        setActiveTool("move");
+      });
+    };
+    document.addEventListener("pointerdown", finishTextFromOutsideClick, true);
+    return () => document.removeEventListener("pointerdown", finishTextFromOutsideClick, true);
+  }, [editingId, screen, setActiveTool, updateNode]);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!rootRef.current) return;
       if (e.key === "Escape" && editingId) {
@@ -774,15 +815,25 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
       if (!mod && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key) && canvas.selIds.length) {
         e.preventDefault();
         const distance = e.shiftKey ? 10 : 1;
+        const movedIds: string[] = [];
         for (const id of canvas.selIds) {
           const selected = findNodeById(screen, id);
-          if (!selected || findParentNode(screen, id)?.props.autoLayout) continue;
+          const parent = findParentNode(screen, id);
+          if (!selected) continue;
+          if (parent?.props.autoLayout) {
+            const directionMatches = parent.props.direction === "row"
+              ? e.key === "ArrowLeft" || e.key === "ArrowRight"
+              : e.key === "ArrowUp" || e.key === "ArrowDown";
+            if (directionMatches) reorderNode(id, e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 1);
+            continue;
+          }
           setGeom(id, {
             x: selected.x + (e.key === "ArrowLeft" ? -distance : e.key === "ArrowRight" ? distance : 0),
             y: selected.y + (e.key === "ArrowUp" ? -distance : e.key === "ArrowDown" ? distance : 0),
           });
+          movedIds.push(id);
         }
-        commitHistory(false, "MOVE_FRAMES", canvas.selIds);
+        if (movedIds.length) commitHistory(false, "MOVE_FRAMES", movedIds);
         return;
       }
       if (!mod && e.shiftKey && key === "a") {
@@ -810,7 +861,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [canvas.selIds, editingId, screen, undo, redo, copySelected, cutSelected, pasteClipboard, replaceSelectedWithClipboard, duplicateSelected, autoLayoutSelected, selectAllEligible, deleteNode, selectTool, setActiveTool, setGeom, commitHistory, toggleRulers, updateNode, updateTextContent, zoomFromCenter]);
+  }, [canvas.selIds, editingId, screen, undo, redo, copySelected, cutSelected, pasteClipboard, replaceSelectedWithClipboard, duplicateSelected, autoLayoutSelected, selectAllEligible, deleteNode, selectTool, setActiveTool, setGeom, reorderNode, commitHistory, toggleRulers, updateNode, updateTextContent, zoomFromCenter]);
 
   useEffect(() => {
     const onSpace = (e: KeyboardEvent) => {
@@ -834,7 +885,12 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     };
   }, [activeTool, setActiveTool]);
 
-  const onContext = (e: React.MouseEvent, nid: string | null) => { e.preventDefault(); setAiCard({ x: e.clientX, y: e.clientY, nid }); };
+  const onContext = (e: React.MouseEvent, nid: string | null) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (nid && !canvas.selIds.includes(nid)) setSel(nid);
+    setAiCard({ x: e.clientX, y: e.clientY, nid });
+  };
   const finishEditing = (id: string, text: string) => {
     updateNode(id, { text });
     setEditingId(null);
@@ -848,12 +904,15 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const applyAI = (prompt: string) => {
     const id = aiCard?.nid; if (!id) return;
     const t = prompt.toLowerCase();
-    const n = getScreen(canvas.screen)?.nodes.find((x) => x.id === id);
+    const n = findNodeById(screen, id);
     if (t.includes("dark")) updateNode(id, { fill: "#18181b", color: "#fff" });
     else if (t.includes("chart")) updateNode(id, { text: (n?.props.text || "Card") + " 📊" });
     else if (t.includes("sidebar")) { setGeom(id, { x: 0 }); updateNode(id, { pad: 8, text: "☰ " + (n?.props.text || "Menu") }); }
     setAiCard(null);
   };
+
+  const contextSelection = aiCard?.nid && !canvas.selIds.includes(aiCard.nid) ? [aiCard.nid] : canvas.selIds;
+  const contextCanUngroup = contextSelection.some((id) => !!findNodeById(screen, id)?.children?.length);
 
   const viewportRect = vpRef.current?.getBoundingClientRect();
   const viewportWorld = {
@@ -1055,18 +1114,24 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
         </div>
 
       {aiCard && (
-        <div className="fixed z-50 w-64 bg-white border border-zinc-200 rounded-2xl shadow-2xl p-3" style={{ left: Math.min(aiCard.x, window.innerWidth - 270), top: Math.min(aiCard.y, window.innerHeight - 200) }}>
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-[12px] font-semibold text-violet-700">✦ AI</span>
-            <button onClick={() => setAiCard(null)} className="text-zinc-400 hover:text-zinc-600">✕</button>
+        <>
+          <button type="button" aria-label="Close context menu" className="fixed inset-0 z-40 cursor-default" onMouseDown={() => setAiCard(null)} />
+          <div role="menu" aria-label="Canvas actions" className="fixed z-50 w-72 overflow-hidden rounded-2xl border border-zinc-700 bg-[#202020] p-2 text-[13px] text-white shadow-2xl" style={{ left: Math.max(8, Math.min(aiCard.x, window.innerWidth - 296)), top: Math.max(8, Math.min(aiCard.y, window.innerHeight - 430)) }} onMouseDown={(event) => event.stopPropagation()}>
+            <ContextMenuButton label="Copy" shortcut="⌘C" onClick={() => { copySelected(); setAiCard(null); }} />
+            <ContextMenuButton label="Paste here" shortcut="⌘V" onClick={() => { pasteClipboard(); setAiCard(null); }} />
+            <ContextMenuButton label="Paste to replace" shortcut="⇧⌘R" disabled={!canvas.selIds.length} onClick={() => { replaceSelectedWithClipboard(); setAiCard(null); }} />
+            <div className="my-2 h-px bg-zinc-700" />
+            {canvas.selIds.length > 1 && <ContextMenuButton label="Group selection" shortcut="⌘G" onClick={() => { groupSelected(); setAiCard(null); }} />}
+            {contextCanUngroup && <ContextMenuButton label="Ungroup" shortcut="⇧⌘G" onClick={() => { ungroupSelected(); setAiCard(null); }} />}
+            <ContextMenuButton label="Add auto layout" shortcut="⇧A" disabled={!canvas.selIds.length} onClick={() => { autoLayoutSelected(); setAiCard(null); }} />
+            <div className="my-2 h-px bg-zinc-700" />
+            <div className="px-3 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-violet-300">✦ AI actions</div>
+            {["Make it dark", "Add a chart", "Turn into sidebar"].map((prompt) => <ContextMenuButton key={prompt} label={prompt} onClick={() => applyAI(prompt)} />)}
+            <div className="mt-2 border-t border-zinc-700 px-2 pt-2">
+              <input aria-label="Describe an AI change" placeholder="Describe a change…" className="w-full rounded-lg border border-zinc-600 bg-zinc-800 px-2.5 py-2 text-[12px] text-white outline-none placeholder:text-zinc-500 focus:border-violet-400" onKeyDown={(event) => { if (event.key === "Enter") applyAI((event.target as HTMLInputElement).value); }} />
+            </div>
           </div>
-          <div className="flex gap-1.5 mb-2 flex-wrap">
-            {["Make it dark", "Add a chart", "Turn into sidebar"].map((s) => (
-              <button key={s} onClick={() => applyAI(s)} className="text-[11px] border border-zinc-200 rounded-full px-2.5 py-1 hover:bg-zinc-50">{s}</button>
-            ))}
-          </div>
-          <input placeholder="Describe a change…" className="w-full text-[12px] border border-zinc-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-violet-400" onKeyDown={(e) => { if (e.key === "Enter") applyAI((e.target as HTMLInputElement).value); }} />
-        </div>
+        </>
       )}
 
       <div className="fixed bottom-3 left-1/2 -translate-x-1/2 z-40">

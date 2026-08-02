@@ -798,6 +798,8 @@ type NodeLocation = {
   absY: number;
 };
 
+type NodeAncestry = NodeLocation & { ancestors: CNode[] };
+
 function findNodeLocation(nodes: CNode[], id: string, parent: CNode | null = null, baseX = 0, baseY = 0): NodeLocation | undefined {
   for (const node of nodes) {
     const absX = baseX + node.x;
@@ -805,6 +807,19 @@ function findNodeLocation(nodes: CNode[], id: string, parent: CNode | null = nul
     if (node.id === id) return { node, parent, siblings: nodes, absX, absY };
     if (node.children) {
       const found = findNodeLocation(node.children, id, node, absX, absY);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+function findNodeAncestry(nodes: CNode[], id: string, ancestors: CNode[] = [], baseX = 0, baseY = 0): NodeAncestry | undefined {
+  for (const node of nodes) {
+    const absX = baseX + node.x;
+    const absY = baseY + node.y;
+    if (node.id === id) return { node, parent: ancestors[ancestors.length - 1] ?? null, siblings: nodes, absX, absY, ancestors };
+    if (node.children) {
+      const found = findNodeAncestry(node.children, id, [...ancestors, node], absX, absY);
       if (found) return found;
     }
   }
@@ -1336,18 +1351,31 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
       return;
     }
     const locations = st.canvas.selIds
-      .map((id) => findNodeLocation(sc.nodes, id))
-      .filter((location): location is NodeLocation => !!location && location.node.visible !== false && !location.node.locked);
-    if (locations.length < 2 || !locations.every((location) => location.siblings === locations[0].siblings)) return;
-    const siblings = locations[0].siblings;
-    const nodes = locations.map((location) => location.node);
+      .map((id) => findNodeAncestry(sc.nodes, id))
+      .filter((location): location is NodeAncestry => !!location && location.node.visible !== false && !location.node.locked);
+    if (locations.length < 2) return;
+    const selectedIds = new Set(locations.map((location) => location.node.id));
+    const topLevelLocations = locations.filter((location) => !location.ancestors.some((ancestor) => selectedIds.has(ancestor.id)));
+    if (topLevelLocations.length < 2) return;
+    const commonParent = [...topLevelLocations[0].ancestors].reverse()
+      .find((ancestor) => topLevelLocations.every((location) => location.ancestors.includes(ancestor)));
+    const siblings = commonParent?.children ?? sc.nodes;
+    const commonLocation = commonParent ? findNodeLocation(sc.nodes, commonParent.id) : undefined;
+    const baseX = commonLocation?.absX ?? 0;
+    const baseY = commonLocation?.absY ?? 0;
+    const nodes = topLevelLocations.map((location) => ({
+      ...location.node,
+      x: location.absX - baseX,
+      y: location.absY - baseY,
+    }));
     const bounds = relBounds(nodes);
     const horizontalSpan = Math.max(...nodes.map((node) => node.x + node.w / 2)) - Math.min(...nodes.map((node) => node.x + node.w / 2));
     const verticalSpan = Math.max(...nodes.map((node) => node.y + node.h / 2)) - Math.min(...nodes.map((node) => node.y + node.h / 2));
     const direction = horizontalSpan >= verticalSpan ? "row" : "col";
     const ordered = [...nodes].sort((a, b) => direction === "row" ? (a.x - b.x) || (a.y - b.y) : (a.y - b.y) || (a.x - b.x));
+    const wrapperId = uuid("frame");
     const wrapper: CNode = {
-      id: uuid("frame"),
+      id: wrapperId,
       type: "frame",
       name: "Frame",
       x: bounds.x - 10,
@@ -1369,14 +1397,23 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
         layoutSizingHorizontal: "hug",
         layoutSizingVertical: "hug",
       },
-      children: ordered.map((node) => ({ ...node })),
+      children: ordered.map((node) => ({ ...node, parentId: wrapperId })),
     };
     resizeAutoLayoutContainer(wrapper);
     const selected = new Set(nodes.map((node) => node.id));
-    const insertAt = Math.min(...locations.map((location) => location.siblings.findIndex((node) => node.id === location.node.id)));
+    const directIndexes = topLevelLocations
+      .filter((location) => location.siblings === siblings)
+      .map((location) => siblings.findIndex((node) => node.id === location.node.id))
+      .filter((index) => index >= 0);
+    const insertAt = directIndexes.length ? Math.min(...directIndexes) : siblings.length;
+    const affectedParents = new Set(topLevelLocations.map((location) => location.parent?.id).filter((id): id is string => !!id));
+    topLevelLocations.forEach((location) => removeNode(sc.nodes, location.node.id));
     const remaining = siblings.filter((node) => !selected.has(node.id));
     remaining.splice(Math.max(0, insertAt), 0, wrapper);
     siblings.splice(0, siblings.length, ...remaining);
+    affectedParents.forEach((id) => { if (id !== commonParent?.id) relayoutNodeAndAncestors(sc, id); });
+    if (commonParent?.props.autoLayout) relayoutNodeAndAncestors(sc, commonParent.id);
+    sc.nodes = [...sc.nodes];
     set({ canvas: { ...st.canvas, selIds: [wrapper.id] } });
     get().pushHistory("GROUP", [wrapper.id, ...nodes.map((node) => node.id)]);
   },
@@ -1387,9 +1424,10 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     if (!location || location.node.locked || location.node.visible === false) return;
     const index = location.siblings.findIndex((node) => node.id === location.node.id);
     if (index < 0) return;
-    const child = { ...location.node, x: autoLayout ? 10 : 0, y: autoLayout ? 10 : 0 };
+    const wrapperId = uuid("frame");
+    const child = { ...location.node, parentId: wrapperId, x: autoLayout ? 10 : 0, y: autoLayout ? 10 : 0 };
     const wrapper: CNode = {
-      id: uuid("frame"),
+      id: wrapperId,
       type: "frame",
       name: "Frame",
       x: location.node.x - (autoLayout ? 10 : 0),
@@ -1422,16 +1460,28 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const st = get();
     const sc = getScreen(st.canvas.screen); if (!sc) return;
     const ids = [...st.canvas.selIds];
-    const target = ids.map((id) => sc.nodes.find((n) => n.id === id)).filter((n): n is CNode => !!n && !!n.children && n.children.length > 0);
-    if (!target.length) return;
+    const targets = ids
+      .map((id) => findNodeLocation(sc.nodes, id))
+      .filter((location): location is NodeLocation => !!location && !!location.node.children?.length && !location.node.locked);
+    if (!targets.length) return;
     const inserted: string[] = [];
-    target.forEach((g) => {
-      const kids = g.children ?? [];
-      const local = kids.map((c) => ({ ...c, parentId: undefined, x: c.x + g.x, y: c.y + g.y }));
-      local.forEach((c) => sc.nodes.push(c));
+    const affectedParents = new Set<string>();
+    targets.forEach((location) => {
+      const wrapper = location.node;
+      const index = location.siblings.findIndex((node) => node.id === wrapper.id);
+      if (index < 0) return;
+      const local = (wrapper.children ?? []).map((child) => ({
+        ...child,
+        parentId: location.parent?.id,
+        x: child.x + wrapper.x,
+        y: child.y + wrapper.y,
+      }));
+      location.siblings.splice(index, 1, ...local);
       inserted.push(...local.map((c) => c.id));
-      sc.nodes = sc.nodes.filter((n) => n.id !== g.id);
+      if (location.parent) affectedParents.add(location.parent.id);
     });
+    affectedParents.forEach((id) => relayoutNodeAndAncestors(sc, id));
+    sc.nodes = [...sc.nodes];
     set({ canvas: { ...st.canvas, selIds: inserted } });
     get().pushHistory("UNGROUP", [...ids, ...inserted]);
   },
@@ -1839,8 +1889,11 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const i = siblings.findIndex((n) => n.id === id); if (i < 0) return;
     const j = i + dir; if (j < 0 || j >= siblings.length) return;
     [siblings[i], siblings[j]] = [siblings[j], siblings[i]];
+    const parent = findNodeLocation(sc.nodes, id)?.parent;
+    if (parent?.props.autoLayout) relayoutNodeAndAncestors(sc, parent.id);
+    sc.nodes = [...sc.nodes];
     set({ canvas: { ...st.canvas } });
-    get().pushHistory("UPDATE_FRAME", [id]);
+    get().pushHistory("MOVE_FRAMES", [id, ...(parent ? [parent.id] : [])]);
   },
   reorderNodeTo: (id, targetId) => {
     const st = get();

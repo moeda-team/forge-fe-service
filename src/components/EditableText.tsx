@@ -50,11 +50,14 @@ export default function EditableText({
 
   const input = (
     <input
+      data-canvas-text-editor="true"
       ref={inputRef as React.RefObject<HTMLInputElement>}
       value={text}
       placeholder={placeholder}
       maxLength={maxLength}
       spellCheck={false}
+      onMouseDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
       onChange={(e) => {
         setText(e.target.value);
         onChange?.(e.target.value);
@@ -83,11 +86,14 @@ export default function EditableText({
 
   const textarea = (
     <textarea
+      data-canvas-text-editor="true"
       ref={inputRef as React.RefObject<HTMLTextAreaElement>}
       value={text}
       placeholder={placeholder}
       maxLength={maxLength}
       spellCheck={false}
+      onMouseDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
       onChange={(e) => {
         setText(e.target.value);
         onChange?.(e.target.value);
