@@ -23,3 +23,18 @@ p.req-new { padding: 4px 8px; }
   to   { opacity: 1; transform: scale(1) translateY(0); }
 }
 .animate-pop { animation: pop-in 150ms ease-out; }
+
+@keyframes kanban-scan {
+  0% { transform: translateY(-110%); opacity: 0; }
+  12% { opacity: 1; }
+  88% { opacity: 1; }
+  100% { transform: translateY(310%); opacity: 0; }
+}
+
+@keyframes kanban-radar {
+  0% { transform: translate(-50%, -50%) scale(0.35); opacity: 0.85; }
+  100% { transform: translate(-50%, -50%) scale(1.45); opacity: 0; }
+}
+
+.kanban-scan-line { animation: kanban-scan 1.5s cubic-bezier(0.28, 0, 0.22, 1) infinite; }
+.kanban-scan-radar { animation: kanban-radar 1.8s ease-out infinite; }

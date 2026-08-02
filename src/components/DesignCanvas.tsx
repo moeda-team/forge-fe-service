@@ -209,8 +209,10 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const [selectionBox, setSelectionBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [insertionIndicator, setInsertionIndicator] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [dragVisual, setDragVisual] = useState<{ id: string; dx: number; dy: number } | null>(null);
+  const [selectedGuideId, setSelectedGuideId] = useState<string | null>(null);
   const [remoteCanvasLoading, setRemoteCanvasLoading] = useState(apiEnabled);
   const [remoteCanvasProgress, setRemoteCanvasProgress] = useState(0);
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [framePreset, setFramePreset] = useState<FramePresetKey | null>(null);
   const [framePresetOpen, setFramePresetOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -225,6 +227,19 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   const preferInternalPaste = useRef(false);
   const previousTool = useRef<ToolKey>("move");
   const initialProjectScreenResolved = useRef(false);
+
+  const createNewLayer = () => {
+    const viewport = vpRef.current?.getBoundingClientRect();
+    const centerX = viewport ? (viewport.width / 2 - pan.x) / zoom : screen.w / 2;
+    const centerY = viewport ? (viewport.height / 2 - pan.y) / zoom : screen.h / 2;
+    addNode("frame", { x: centerX - 160, y: centerY - 100, w: 320, h: 200 });
+    setCreateMenuOpen(false);
+  };
+
+  const createNewCanvas = () => {
+    setCreateMenuOpen(false);
+    createNewScreen();
+  };
 
   useEffect(() => {
     if (!apiEnabled || !currentProjectId) { setRemoteCanvasLoading(false); return; }
@@ -390,7 +405,6 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
         return;
       }
       setSel(n.id, additiveSelection);
-      if (editingId !== n.id) pendingTextEdit.current = n.id;
       return;
     }
     if (startCreating(e)) {
@@ -476,6 +490,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   };
   const onVpDown = (e: React.MouseEvent) => {
     if (e.target !== vpRef.current && !(e.target as HTMLElement).dataset.vp) return;
+    setSelectedGuideId(null);
     vpRef.current?.focus();
     if (editingId) {
       e.preventDefault();
@@ -821,10 +836,10 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
           const parent = findParentNode(screen, id);
           if (!selected) continue;
           if (parent?.props.autoLayout) {
-            const directionMatches = parent.props.direction === "row"
+            const movesAlongLayout = parent.props.direction === "row"
               ? e.key === "ArrowLeft" || e.key === "ArrowRight"
               : e.key === "ArrowUp" || e.key === "ArrowDown";
-            if (directionMatches) reorderNode(id, e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 1);
+            if (movesAlongLayout) reorderNode(id, e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 1);
             continue;
           }
           setGeom(id, {
@@ -842,6 +857,12 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
         return;
       }
       if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedGuideId) {
+          e.preventDefault();
+          deleteGuide(selectedGuideId);
+          setSelectedGuideId(null);
+          return;
+        }
         if (canvas.selIds.length) { e.preventDefault(); canvas.selIds.forEach((id) => deleteNode(id)); }
         return;
       }
@@ -861,7 +882,7 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [canvas.selIds, editingId, screen, undo, redo, copySelected, cutSelected, pasteClipboard, replaceSelectedWithClipboard, duplicateSelected, autoLayoutSelected, selectAllEligible, deleteNode, selectTool, setActiveTool, setGeom, reorderNode, commitHistory, toggleRulers, updateNode, updateTextContent, zoomFromCenter]);
+  }, [canvas.selIds, editingId, selectedGuideId, screen, undo, redo, copySelected, cutSelected, pasteClipboard, replaceSelectedWithClipboard, duplicateSelected, autoLayoutSelected, selectAllEligible, deleteNode, deleteGuide, selectTool, setActiveTool, setGeom, reorderNode, commitHistory, toggleRulers, updateNode, updateTextContent, zoomFromCenter]);
 
   useEffect(() => {
     const onSpace = (e: KeyboardEvent) => {
@@ -972,7 +993,24 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
             <div className="w-6 h-6 rounded-md bg-zinc-900 text-white grid place-items-center text-xs font-bold">F</div>
             <span className="text-[13px] font-semibold">Forge</span>
           </div>
-          <button onClick={createNewScreen} title="New screen" className="w-6 h-6 rounded-md text-[16px] text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100">+</button>
+          <div className="relative">
+            <button type="button" onClick={() => setCreateMenuOpen((open) => !open)} title="Add layer or canvas" aria-label="Add layer or canvas" aria-expanded={createMenuOpen} className="grid h-7 w-7 place-items-center rounded-md text-[18px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900">+</button>
+            {createMenuOpen && (
+              <>
+                <button type="button" aria-label="Close create menu" className="fixed inset-0 z-40 cursor-default" onClick={() => setCreateMenuOpen(false)} />
+                <div role="menu" aria-label="Create in project" className="absolute left-0 top-full z-50 mt-2 w-52 rounded-xl border border-zinc-200 bg-white p-1.5 shadow-2xl">
+                  <button type="button" role="menuitem" onClick={createNewLayer} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-zinc-100">
+                    <span className="grid h-7 w-7 place-items-center rounded-md border border-zinc-200 text-zinc-600">▭</span>
+                    <span><span className="block text-[12px] font-medium text-zinc-800">New layer</span><span className="block text-[10px] text-zinc-400">Add frame to this canvas</span></span>
+                  </button>
+                  <button type="button" role="menuitem" onClick={createNewCanvas} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left hover:bg-zinc-100">
+                    <span className="grid h-7 w-7 place-items-center rounded-md border border-zinc-200 text-zinc-600">＋</span>
+                    <span><span className="block text-[12px] font-medium text-zinc-800">New canvas</span><span className="block text-[10px] text-zinc-400">Add screen to this project</span></span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         <div className="flex-1 flex items-center justify-center gap-1">
@@ -1036,16 +1074,20 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
                 {insertionIndicator && (
                   <div className="absolute z-40 pointer-events-none rounded-full bg-[#0d99ff] shadow-[0_0_0_1px_white]" style={{ left: pan.x + insertionIndicator.x * zoom, top: pan.y + insertionIndicator.y * zoom, width: Math.max(2, insertionIndicator.w * zoom), height: Math.max(2, insertionIndicator.h * zoom) }} />
                 )}
-                {canvas.guides.map((guide) => (
-                  <div
-                    key={guide.id}
-                    onMouseDown={(e) => { e.stopPropagation(); draggingGuide.current = { id: guide.id, orientation: guide.orientation }; }}
-                    onDoubleClick={(e) => { e.stopPropagation(); deleteGuide(guide.id); }}
-                    className={`absolute z-20 bg-sky-500 ${guide.orientation === "vertical" ? "top-0 bottom-0 w-px cursor-col-resize" : "left-0 right-0 h-px cursor-row-resize"}`}
-                    style={guide.orientation === "vertical" ? { left: pan.x + guide.position * zoom } : { top: pan.y + guide.position * zoom }}
-                    title="Drag guide · double-click to delete"
-                  />
-                ))}
+                {canvas.guides.map((guide) => {
+                  const guidePosition = guide.orientation === "vertical" ? pan.x + guide.position * zoom : pan.y + guide.position * zoom;
+                  const selected = selectedGuideId === guide.id;
+                  return <div key={guide.id}>
+                    <div
+                      onMouseDown={(e) => { e.stopPropagation(); setSelectedGuideId(guide.id); draggingGuide.current = { id: guide.id, orientation: guide.orientation }; }}
+                      onDoubleClick={(e) => { e.stopPropagation(); deleteGuide(guide.id); setSelectedGuideId(null); }}
+                      className={`absolute z-20 bg-sky-500 ${selected ? "shadow-[0_0_0_1px_#0ea5e9]" : ""} ${guide.orientation === "vertical" ? "top-0 bottom-0 w-px cursor-col-resize" : "left-0 right-0 h-px cursor-row-resize"}`}
+                      style={guide.orientation === "vertical" ? { left: guidePosition } : { top: guidePosition }}
+                      title="Click and press Delete · drag to move · double-click to delete"
+                    />
+                    {selected && <button type="button" aria-label="Delete guide" onMouseDown={(event) => event.stopPropagation()} onClick={() => { deleteGuide(guide.id); setSelectedGuideId(null); }} className="absolute z-50 grid h-5 w-5 place-items-center rounded-full bg-sky-500 text-[12px] leading-none text-white shadow-md hover:bg-red-500" style={guide.orientation === "vertical" ? { left: guidePosition - 10, top: 26 } : { right: 8, top: guidePosition - 10 }}>×</button>}
+                  </div>;
+                })}
                 <div className="absolute top-0 left-0 origin-top-left" style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
                   <div className="absolute overflow-visible" style={{ left: 0, top: 0 }}>
                     {screen.nodes.map((n) => (

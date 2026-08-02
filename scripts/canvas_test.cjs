@@ -453,10 +453,17 @@ assert.match(canvasSource, /userSelect:\s*editingId\s*===\s*n\.id\s*\?\s*["']tex
 assert.match(canvasSource, /mod\s*&&\s*e\.shiftKey\s*&&\s*key\s*===\s*["']r["']/, "Cmd+Shift+R triggers paste-to-replace");
 assert.match(canvasSource, /mod\s*&&\s*key\s*===\s*["']x["']/, "Ctrl/Cmd+X triggers cut on the canvas selection");
 assert.match(canvasSource, /const distance = e\.shiftKey \? 10 : 1/, "Arrow keys nudge selection by 1px or 10px with Shift");
-assert.match(canvasSource, /directionMatches[\s\S]*?reorderNode\(id,/, "Arrow keys reorder children along their Auto Layout direction");
+assert.match(canvasSource, /movesAlongLayout[\s\S]*?reorderNode\(id, e\.key === "ArrowLeft"/, "Left and right arrows reorder children in row Auto Layout without pixel offsets");
 assert.match(canvasSource, /role="menu" aria-label="Canvas actions"/, "Right-click opens the canvas action menu");
+assert.match(canvasSource, /aria-label="Add layer or canvas"/, "Header plus button opens project creation actions");
+assert.match(canvasSource, /aria-label="Delete guide"/, "A selected ruler guide exposes a visible delete button");
+assert.match(canvasSource, /if \(selectedGuideId\)[\s\S]*?deleteGuide\(selectedGuideId\)/, "Delete and Backspace remove the selected guide");
+assert.match(canvasSource, /createNewLayer[\s\S]*?addNode\("frame"/, "New layer action inserts a frame into the active canvas");
+assert.match(canvasSource, /New canvas[\s\S]*?Add screen to this project/, "Create menu exposes a new canvas in the current project");
 assert.match(canvasSource, /label="Ungroup"[\s\S]*?ungroupSelected\(\)/, "Context menu exposes Ungroup for container selections");
 assert.match(canvasSource, /document\.addEventListener\("pointerdown", finishTextFromOutsideClick, true\)/, "Clicking anywhere outside the active text editor finishes text editing");
+assert.match(canvasSource, /canvas\.selIds\.includes\(n\.id\)[\s\S]*?textClick:\s*true/, "A second click on selected text enters text editing");
+assert.doesNotMatch(canvasSource, /setSel\(n\.id, additiveSelection\);\s*if \(editingId !== n\.id\) pendingTextEdit/, "A first click selects text without immediately entering editing");
 const editableTextSource = fs.readFileSync(path.join(process.cwd(), "src/components/EditableText.tsx"), "utf8");
 assert.match(editableTextSource, /data-canvas-text-editor="true"/, "Editable text identifies clicks that must keep text editing active");
 assert.match(editableTextSource, /onMouseDown=\{\(event\) => event\.stopPropagation\(\)\}/, "Text editor pointer input does not trigger canvas node dragging");
@@ -472,6 +479,13 @@ assert.match(inspectorSource, /Font family/, "Typography inspector exposes font 
 assert.match(inspectorSource, /Paragraph spacing/, "Typography inspector exposes paragraph spacing controls");
 const pageSource = fs.readFileSync(path.join(process.cwd(), "src/app/page.tsx"), "utf8");
 assert.match(pageSource, /dynamic\(\(\)\s*=>\s*import\(["']@\/components\/DesignCanvas["']\)/, "Design Canvas bundle is lazy-loaded at the view boundary");
+const kanbanSource = fs.readFileSync(path.join(process.cwd(), "src/components/Kanban.tsx"), "utf8");
+assert.match(kanbanSource, /Execution Board/, "Kanban uses the execution-board visual hierarchy from the design reference");
+assert.match(kanbanSource, /Overall progress/, "Kanban exposes overall completion progress");
+assert.match(kanbanSource, /style=\{\{ width: `\$\{progress\}%` \}\}/, "Kanban task cards render status progress bars");
+assert.match(kanbanSource, /kanban-scan-line/, "In-progress task previews render the moving scanner animation");
+const globalStylesSource = fs.readFileSync(path.join(process.cwd(), "src/app/globals.css"), "utf8");
+assert.match(globalStylesSource, /@keyframes kanban-scan[\s\S]*?translateY\(310%\)/, "Kanban scanner sweeps vertically across the preview");
 assert.doesNotMatch(canvasSource, /selected\s*\?\s*["'`][^"'`]*\bz-\d+/, "Selection does not assign a foreground z-index to the selected object");
 assert.match(canvasSource, /whiteSpace:\s*n\.type\s*===\s*["']text["']\s*\?\s*["']pre["']/, "Text remains unwrapped after its editing state closes");
 
