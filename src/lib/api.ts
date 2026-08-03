@@ -179,7 +179,19 @@ export const forgeApi = {
   async listScreens(projectId: string) { return (await request<RawScreen[]>(`/projects/${projectId}/canvas`)).map(screen); },
   async createScreen(projectId: string, name: string, w = 1440, h = 1024, settings?: Partial<ScreenSettings>) { return screen(await request<RawScreen>(`/projects/${projectId}/canvas/screens`, { method: "POST", body: JSON.stringify({ name, width: w, height: h, settings, nodes: [], guides: [] }) })); },
   async getScreenDocument(screenId: string) { const result = await request<{ id: string; nodes: StoredNode[]; guides: Guide[]; settings?: Partial<ScreenSettings>; revision: number }>(`/screens/${screenId}/nodes`); return { ...result, nodes: hydrateNodes(result.nodes) }; },
-  async saveScreenDocument(screenId: string, input: { revision: number; name: string; w: number; h: number; nodes: CNode[]; guides: Guide[]; settings: Partial<ScreenSettings>; history?: Pick<HistoryEntry, "action" | "payload" | "inverse" | "affectedIds"> }) { return request<{ id: string; revision: number; stale: boolean; updatedAt: string }>(`/screens/${screenId}/document`, { method: "PUT", body: JSON.stringify({ ...input, width: input.w, height: input.h, nodes: flattenNodes(input.nodes) }) }); },
+  async saveScreenDocument(screenId: string, input: { revision: number; name: string; w: number; h: number; nodes: CNode[]; guides: Guide[]; settings: Partial<ScreenSettings>; history?: Pick<HistoryEntry, "action" | "payload" | "inverse" | "affectedIds"> }) {
+    const body = {
+      revision: input.revision,
+      name: input.name,
+      width: input.w,
+      height: input.h,
+      nodes: flattenNodes(input.nodes),
+      guides: input.guides,
+      settings: input.settings,
+      ...(input.history ? { history: input.history } : {}),
+    };
+    return request<{ id: string; revision: number; stale: boolean; updatedAt: string }>(`/screens/${screenId}/document`, { method: "PUT", body: JSON.stringify(body) });
+  },
   async patchScreenDocument(screenId: string, input: { revision: number; name: string; w: number; h: number; addedNodes: CNode[]; updatedNodes: CNode[]; deletedIds: string[]; guides: Guide[]; settings: Partial<ScreenSettings>; history?: Pick<HistoryEntry, "action" | "payload" | "inverse" | "affectedIds"> }) { const current = await this.getScreenDocument(screenId); const nodes = new Map(current.nodes.map((node) => [node.id, node])); input.updatedNodes.forEach((node) => nodes.set(node.id, node)); input.addedNodes.forEach((node) => nodes.set(node.id, node)); input.deletedIds.forEach((id) => nodes.delete(id)); return this.saveScreenDocument(screenId, { ...input, nodes: Array.from(nodes.values()) }); },
   saveScreenNodes: (screenId: string, nodes: CNode[]) => request(`/screens/${screenId}/nodes`, { method: "PUT", body: JSON.stringify({ nodes: flattenNodes(nodes) }) }),
   saveScreenGuides: (screenId: string, guides: Guide[]) => request(`/screens/${screenId}/guides`, { method: "PUT", body: JSON.stringify({ guides }) }),

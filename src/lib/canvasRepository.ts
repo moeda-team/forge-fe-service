@@ -27,4 +27,31 @@ export class InMemoryCanvasRepository implements CanvasRepository {
   }
 }
 
-export const canvasRepository: CanvasRepository = new InMemoryCanvasRepository();
+export class LocalStorageCanvasRepository implements CanvasRepository {
+  constructor(private readonly prefix = "forge:canvas:") {}
+
+  async save(projectId: string, screens: Screen[]) {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(`${this.prefix}${projectId}`, JSON.stringify(copyScreens(screens)));
+  }
+
+  async load(projectId: string) {
+    if (typeof window === "undefined") return null;
+    const value = window.localStorage.getItem(`${this.prefix}${projectId}`);
+    if (!value) return null;
+    try {
+      const screens = JSON.parse(value) as Screen[];
+      return Array.isArray(screens) ? copyScreens(screens) : null;
+    } catch {
+      // A corrupt browser entry must not prevent the canvas from opening.
+      window.localStorage.removeItem(`${this.prefix}${projectId}`);
+      return null;
+    }
+  }
+
+  async delete(projectId: string) {
+    if (typeof window !== "undefined") window.localStorage.removeItem(`${this.prefix}${projectId}`);
+  }
+}
+
+export const canvasRepository: CanvasRepository = new LocalStorageCanvasRepository();

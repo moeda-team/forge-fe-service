@@ -1,7 +1,7 @@
 "use client";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { flushSync } from "react-dom";
-import { useCanvas, getScreen, findNodeById, findParentNode, getAutoLayoutDropPreview, SCREENS, useStore, loadRemoteCanvas } from "@/lib/store";
+import { useCanvas, getScreen, findNodeById, findParentNode, getAutoLayoutDropPreview, SCREENS, useStore, loadLocalCanvas, loadRemoteCanvas } from "@/lib/store";
 import type { CNode } from "@/lib/types";
 import LayersPanel from "./LayersPanel";
 import InspectorPanel from "./InspectorPanel";
@@ -244,7 +244,17 @@ export default function DesignCanvas({ onBack }: { onBack?: () => void } = {}) {
   };
 
   useEffect(() => {
-    if (!apiEnabled || !currentProjectId) { setRemoteCanvasLoading(false); return; }
+    if (!currentProjectId) { setRemoteCanvasLoading(false); return; }
+    if (!apiEnabled) {
+      let cancelled = false;
+      setRemoteCanvasLoading(true);
+      void loadLocalCanvas(currentProjectId)
+        .catch((error) => {
+          if (!cancelled) useStore.setState({ apiError: error instanceof Error ? error.message : "Unable to load the saved design canvas" });
+        })
+        .finally(() => { if (!cancelled) setRemoteCanvasLoading(false); });
+      return () => { cancelled = true; };
+    }
     let cancelled = false;
     let completionTimer: number | undefined;
     setRemoteCanvasLoading(true);

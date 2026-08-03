@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { ArtifactKind, Project, Requirement, ReqItem, KanbanCard, Screen, CNode, NodeType, Guide, Tool, HistoryEntry, ScreenSettings, ViewKey } from "./types";
 import { ApiError, apiEnabled, forgeApi, mapProject, mapRequirement, mapRequirementSnapshots, setAccessToken, type KanbanSyncResult } from "./api";
 import { layoutAutoLayout, layoutCanvasNodes, measureCanvasText } from "./canvasLayout";
+import { canvasRepository } from "./canvasRepository";
 
 export const STAGES = ["Brief", "Design", "Build", "Launch", "Scale"];
 
@@ -1110,6 +1111,27 @@ export function loadRemoteCanvas(projectId: string, onProgress?: (progress: numb
   });
 }
 
+export async function loadLocalCanvas(projectId: string) {
+  if (apiEnabled) return;
+  const saved = await canvasRepository.load(projectId);
+  if (!saved?.length) return;
+  const visibleNames = new Set(saved.map((screen) => screen.name));
+  const kept = SCREENS.filter((screen) => screen.projectId !== projectId && (screen.projectId || !visibleNames.has(screen.name)));
+  const restored = saved.map((screen) => ({
+    ...screen,
+    projectId: screen.projectId || projectId,
+    guides: screen.guides || [],
+    settings: resolvedSettings(screen.settings),
+    history: screen.history || [],
+  }));
+  SCREENS.splice(0, SCREENS.length, ...kept, ...restored);
+  const first = restored[0];
+  if (first) useCanvas.setState((state) => ({
+    canvas: canvasForScreen(state.canvas, first, first.history),
+    saveStatus: "saved",
+  }));
+}
+
 async function loadRemoteCanvasOnce(projectId: string) {
   if (!apiEnabled) return;
   reportRemoteCanvasProgress(projectId, 8);
@@ -1187,12 +1209,32 @@ async function loadRemoteCanvasOnce(projectId: string) {
 }
 
 function scheduleRemoteCanvasSave() {
-  if (!apiEnabled || typeof window === "undefined") return;
+  if (typeof window === "undefined") return;
   const projectId = useStore.getState().currentId;
   const state = useCanvas.getState();
   const screen = getScreen(state.canvas.screen);
-  if (!projectId || !screen?.id || screen.projectId !== projectId) return;
+  if (!projectId || !screen) return;
   syncCanvasToScreen(screen, state.canvas);
+  if (!apiEnabled) {
+    const key = `local:${projectId}`;
+    const existing = canvasSaveTimers.get(key);
+    if (existing) clearTimeout(existing);
+    useCanvas.setState({ saveStatus: "saving" });
+    canvasSaveTimers.set(key, setTimeout(() => {
+      canvasSaveTimers.delete(key);
+      const latest = useCanvas.getState();
+      syncCanvasToScreen(getScreen(latest.canvas.screen), latest.canvas);
+      const screens = SCREENS.filter((item) => !item.projectId || item.projectId === projectId);
+      void canvasRepository.save(projectId, screens)
+        .then(() => useCanvas.setState({ saveStatus: "saved" }))
+        .catch((error) => {
+          useCanvas.setState({ saveStatus: "error" });
+          useStore.setState({ apiError: errorMessage(error) });
+        });
+    }, 300));
+    return;
+  }
+  if (!screen.id || screen.projectId !== projectId) return;
   const existing = canvasSaveTimers.get(screen.id);
   if (existing) clearTimeout(existing);
   useCanvas.setState({ saveStatus: "saving" });
@@ -1292,19 +1334,23 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
   createScreen: async (name) => {
     const projectId = useStore.getState().currentId;
     if (!projectId || !name.trim()) return;
-    const created = await forgeApi.createScreen(projectId, name.trim(), 1440, 1024, DEFAULT_SCREEN_SETTINGS);
+    const created = apiEnabled
+      ? await forgeApi.createScreen(projectId, name.trim(), 1440, 1024, DEFAULT_SCREEN_SETTINGS)
+      : { id: uuid("screen"), name: name.trim(), w: 1440, h: 1024, revision: 0, settings: DEFAULT_SCREEN_SETTINGS };
     const screen: Screen = { ...created, projectId, nodes: [], guides: [], settings: created.settings || DEFAULT_SCREEN_SETTINGS, history: [] };
     SCREENS.push(screen);
     set((state) => ({ canvas: canvasForScreen(state.canvas, screen), saveStatus: "saved" }));
+    scheduleRemoteCanvasSave();
   },
   renameScreen: async (name) => {
     const state = get();
     const screen = getScreen(state.canvas.screen);
     const nextName = name.trim();
     if (!screen?.id || !nextName || nextName === screen.name) return;
-    await forgeApi.updateScreen(screen.id, { name: nextName });
+    if (apiEnabled) await forgeApi.updateScreen(screen.id, { name: nextName });
     screen.name = nextName;
     set({ canvas: { ...state.canvas, screen: nextName }, saveStatus: "saved" });
+    scheduleRemoteCanvasSave();
   },
   duplicateScreen: async (name) => {
     const state = get();
@@ -1312,13 +1358,13 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const nextName = name.trim();
     if (!source?.id || !nextName) return;
     syncCanvasToScreen(source, state.canvas);
-    await Promise.all([
+    if (apiEnabled) await Promise.all([
       forgeApi.saveScreenNodes(source.id, source.nodes),
       forgeApi.saveScreenGuides(source.id, source.guides || []),
       forgeApi.updateScreen(source.id, { settings: resolvedSettings(source.settings) }),
     ]);
-    const created = await forgeApi.duplicateScreen(source.id, nextName);
-    const document = await forgeApi.getScreenDocument(created.id);
+    const created = apiEnabled ? await forgeApi.duplicateScreen(source.id, nextName) : { ...source, id: uuid("screen"), name: nextName };
+    const document = apiEnabled ? await forgeApi.getScreenDocument(created.id!) : { nodes: serializableCanvasNodes(source.nodes), guides: source.guides || [], settings: source.settings };
     const duplicate: Screen = {
       ...created,
       projectId: source.projectId,
@@ -1329,6 +1375,7 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     };
     SCREENS.push(duplicate);
     set({ canvas: canvasForScreen(state.canvas, duplicate), saveStatus: "saved" });
+    scheduleRemoteCanvasSave();
   },
   deleteScreen: async () => {
     const state = get();
@@ -1336,11 +1383,12 @@ export const useCanvas = create<CanvasStore>((set, get) => ({
     const projectId = useStore.getState().currentId;
     const projectScreens = SCREENS.filter((item) => item.projectId === projectId);
     if (!screen?.id || projectScreens.length <= 1) return;
-    await forgeApi.deleteScreen(screen.id);
+    if (apiEnabled) await forgeApi.deleteScreen(screen.id);
     const index = SCREENS.indexOf(screen);
     if (index >= 0) SCREENS.splice(index, 1);
     const next = SCREENS.find((item) => item.projectId === projectId)!;
     set({ canvas: canvasForScreen(state.canvas, next, next.history || []), saveStatus: "saved" });
+    scheduleRemoteCanvasSave();
   },
   setCanvasMode: (m) => set({ canvas: { ...get().canvas, mode: m } }),
   setSel: (id, additive = false, range = false) => {
