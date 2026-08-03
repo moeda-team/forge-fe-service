@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { ArtifactKind, Project, Requirement, ReqItem, KanbanCard, Screen, CNode, NodeType, Guide, Tool, HistoryEntry, ScreenSettings, ViewKey } from "./types";
-import { ApiError, apiEnabled, forgeApi, getAccessToken, mapProject, mapRequirement, mapRequirementSnapshots, setAccessToken, type KanbanSyncResult } from "./api";
+import { ApiError, apiEnabled, forgeApi, mapProject, mapRequirement, mapRequirementSnapshots, setAccessToken, type KanbanSyncResult } from "./api";
 import { layoutAutoLayout, layoutCanvasNodes, measureCanvasText } from "./canvasLayout";
 
 export const STAGES = ["Brief", "Design", "Build", "Launch", "Scale"];
@@ -106,13 +106,10 @@ export const useStore = create<StoreState>((set, get) => ({
   user: null,
   bootstrapApi: async () => {
     if (!apiEnabled) return;
-    if (!getAccessToken()) {
-      set({ apiReady: true, authRequired: true, projects: [], currentId: null });
-      return;
-    }
     try {
-      const [user, projects] = await Promise.all([forgeApi.me(), forgeApi.listProjects()]);
-      set({ user, projects: projects.map(mapProject), currentId: null, apiReady: true, authRequired: false, apiError: null, view: "projects" });
+      const session = await forgeApi.me();
+      const projects = await forgeApi.listProjects();
+      set({ user: session.user, projects: projects.map(mapProject), currentId: null, apiReady: true, authRequired: false, apiError: null, view: "projects" });
     } catch (error) {
       const authRequired = error instanceof ApiError && error.status === 401;
       set({ apiReady: true, authRequired, apiError: authRequired ? null : errorMessage(error), projects: [], currentId: null });
@@ -122,6 +119,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ apiError: null });
     try {
       const user = await forgeApi.login(email, password);
+      await forgeApi.me();
       const projects = await forgeApi.listProjects();
       set({ user, projects: projects.map(mapProject), currentId: null, authRequired: false, apiReady: true, view: "projects" });
     } catch (error) {
@@ -133,13 +131,16 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ apiError: null });
     try {
       const user = await forgeApi.register(name, email, password);
-      set({ user, projects: [], currentId: null, authRequired: false, apiReady: true, view: "projects" });
+      await forgeApi.me();
+      const projects = await forgeApi.listProjects();
+      set({ user, projects: projects.map(mapProject), currentId: null, authRequired: false, apiReady: true, view: "projects" });
     } catch (error) {
       set({ apiError: errorMessage(error) });
       throw error;
     }
   },
   logout: () => {
+    void forgeApi.logout();
     setAccessToken(null);
     set({ user: null, projects: [], currentId: null, authRequired: true, view: "projects", apiError: null });
   },

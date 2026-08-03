@@ -4,13 +4,14 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 Panduan deployment Production dan Preview tersedia di [`DEPLOYMENT.md`](./DEPLOYMENT.md).
 
-Copy `.env.example` to `.env.local` and point it at the Forge backend:
+Copy `.env.example` to `.env.local` and enable the same-origin API proxy:
 
 ```env
-NEXT_PUBLIC_FORGE_API_URL="http://localhost:4000"
+NEXT_PUBLIC_FORGE_API_ENABLED=true
+FORGE_API_URL="http://localhost:4000"
 ```
 
-When this variable is present, authentication, projects, Gemini AI chat, requirements, and Kanban synchronization use `forge-be`. Without it, the existing in-memory demo mode remains available. Gemini credentials belong only in the backend `GEMINI_API_KEY`; never add them to a `NEXT_PUBLIC_*` variable.
+When enabled, authentication, projects, Gemini AI chat, requirements, and Kanban synchronization use `/api/v1` through the Next.js server proxy. `FORGE_API_URL` is server-only; do not expose it as a `NEXT_PUBLIC_*` variable. Without the flag, the existing in-memory demo mode remains available. Gemini credentials belong only in the backend `GEMINI_API_KEY`.
 
 ## Getting Started
 
