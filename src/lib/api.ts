@@ -93,12 +93,32 @@ function toApiProject(raw: RawProject): ApiProjectDetail {
 
 function screen(raw: RawScreen): ApiScreen { return { id: raw.id, name: raw.name, w: raw.width, h: raw.height, revision: raw.revision ?? 0, settings: raw.settings }; }
 
-type StoredNode = Omit<CNode, "w" | "h" | "children"> & { width: number; height: number; children?: never };
+// Keep this representation aligned with the backend's `Node` DTO.  Canvas UI
+// state (such as `expanded` and `selected`) must never be persisted.
+type StoredNode = Pick<CNode, "id" | "type" | "parentId" | "name" | "x" | "y" | "rotation" | "zIndex" | "visible" | "locked" | "props"> & {
+  width: number;
+  height: number;
+  children?: never;
+};
 
 function flattenNodes(nodes: CNode[], parentId?: string): StoredNode[] {
   return nodes.flatMap((node) => {
-    const { children, w, h, parentId: explicitParent, ...rest } = node;
-    const stored = { ...rest, parentId: explicitParent ?? parentId, width: w, height: h } as StoredNode;
+    const { children, parentId: explicitParent } = node;
+    const stored: StoredNode = {
+      id: node.id,
+      type: node.type,
+      parentId: explicitParent ?? parentId,
+      name: node.name,
+      x: node.x,
+      y: node.y,
+      width: node.w,
+      height: node.h,
+      rotation: node.rotation,
+      zIndex: node.zIndex,
+      visible: node.visible,
+      locked: node.locked,
+      props: node.props,
+    };
     return [stored, ...(children ? flattenNodes(children, node.id) : [])];
   });
 }
